@@ -180,7 +180,8 @@ const IntakeForm = ({ onSuccess }) => {
                     <div>
                         <label className="label">Confidentiality</label>
                         <select name="confidentiality_level" value={formData.confidentiality_level} onChange={handleChange} className="input">
-                            <option>General</option>
+                            <option>Public</option>
+                            <option>Internal</option>
                             <option>Confidential</option>
                             <option>Restricted</option>
                         </select>

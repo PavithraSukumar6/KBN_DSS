@@ -8,7 +8,7 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
     const [isUploading, setIsUploading] = useState(false);
     const [containers, setContainers] = useState([]);
     const [selectedContainer, setSelectedContainer] = useState(containerId || '');
-    const [isFastTrack, setIsFastTrack] = useState(false);
+    const [isFastTrack, setIsFastTrack] = useState(true);
     const [taxonomy, setTaxonomy] = useState([]);
     const [tags, setTags] = useState('');
 
@@ -99,6 +99,10 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
             const result = await uploadFile(fileObj);
             if (result.status === 'success' && result.result.suggestions) {
                 setGeneralSuggestions(result.result.suggestions);
+                // Also auto-set department if suggested
+                if (result.result.suggestions.department) {
+                    setSelectedDepartment(result.result.suggestions.department);
+                }
             }
             setFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: result.status, result: result.result, error: result.error } : f));
             if (result.status === 'success' && onUploadSuccess) onUploadSuccess();

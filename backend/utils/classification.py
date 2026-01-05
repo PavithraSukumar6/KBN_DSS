@@ -69,7 +69,22 @@ def suggest_metadata_from_all(filename, text=""):
         suggestions['category'] = "HR"
     elif "legal" in combined or "court" in combined:
         suggestions['category'] = "Legal"
+
+    # Department suggestions based on keywords
+    dept_keywords = {
+        "Finance": ["finance", "invoice", "payroll", "bill", "tax", "payment"],
+        "HR": ["hr", "employee", "hiring", "resume", "staff"],
+        "Legal": ["legal", "court", "contract", "agreement", "lawsuit"],
+        "Operations": ["ops", "operations", "logistics", "supply"],
+    }
     
+    for dept, terms in dept_keywords.items():
+        for term in terms:
+            if term in combined:
+                suggestions['department'] = dept
+                break
+        if 'department' in suggestions: break
+
     # Date suggestion (very simple regex check)
     import re
     date_match = re.search(r'(\d{4}[-]\d{2}[-]\d{2})', combined)
