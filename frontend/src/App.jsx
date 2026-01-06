@@ -12,7 +12,36 @@ function App() {
     const [refreshKey, setRefreshKey] = useState(0);
     const [activeTab, setActiveTab] = useState('pipeline');
     const [globalSearch, setGlobalSearch] = useState('');
+
+    // Auth Simulation
+    const [users, setUsers] = useState([]);
+    const [currentUser, setCurrentUser] = useState(null);
     const [isAdmin, setIsAdmin] = useState(false);
+
+    React.useEffect(() => {
+        // Fetch Users for simulation
+        fetch('http://localhost:5000/users')
+            .then(res => res.json())
+            .then(data => {
+                setUsers(data);
+                // Default to Admin
+                const admin = data.find(u => u.role === 'Admin');
+                if (admin) {
+                    setCurrentUser(admin);
+                    setIsAdmin(true);
+                }
+            })
+            .catch(err => console.error("Failed to load users", err));
+    }, []);
+
+    const handleUserSwitch = (userId) => {
+        const user = users.find(u => u.id === userId);
+        if (user) {
+            setCurrentUser(user);
+            setIsAdmin(user.role === 'Admin');
+            setRefreshKey(prev => prev + 1); // Refresh all views
+        }
+    };
 
     const handleUploadSuccess = () => {
         setRefreshKey(prev => prev + 1);
@@ -33,15 +62,37 @@ function App() {
                 marginBottom: '1rem',
                 position: 'relative'
             }}>
-                <div style={{ position: 'absolute', top: '20px', right: '20px', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <button
-                        onClick={() => setIsAdmin(!isAdmin)}
-                        className="btn btn-ghost"
-                        style={{ background: isAdmin ? 'rgba(59, 130, 246, 0.2)' : 'rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
-                    >
-                        {isAdmin ? <UserCheck size={18} color="#60a5fa" /> : <User size={18} />}
-                        {isAdmin ? "Admin Role" : "General User"}
-                    </button>
+                <div style={{ position: 'absolute', top: '20px', right: '20px', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                    <div className="dropdown" style={{ position: 'relative' }}>
+                        <select
+                            value={currentUser?.id || ''}
+                            onChange={(e) => handleUserSwitch(e.target.value)}
+                            style={{
+                                padding: '0.5rem',
+                                background: 'rgba(255,255,255,0.1)',
+                                border: '1px solid var(--glass-border)',
+                                borderRadius: '8px',
+                                color: 'white',
+                                cursor: 'pointer'
+                            }}
+                        >
+                            {users.map(u => (
+                                <option key={u.id} value={u.id} style={{ color: 'black' }}>
+                                    {u.name} ({u.role} - {u.assigned_scope_value})
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                    {/* Access Request Dashboard Link (Admin Only) */}
+                    {isAdmin && (
+                        <button
+                            className="btn btn-ghost"
+                            style={{ fontSize: '0.8rem', opacity: 0.8 }}
+                            onClick={() => setActiveTab('access_requests')}
+                        >
+                            🔔 Requests
+                        </button>
+                    )}
                 </div>
                 <h1>🚀 Document Sorting & Digitization System</h1>
                 <p style={{ color: 'var(--text-muted)', fontSize: '1.1rem', marginBottom: '1.5rem' }}>
@@ -116,7 +167,7 @@ function App() {
                 ) : (
                     <>
                         <DigitizationPipeline onUploadSuccess={handleUploadSuccess} />
-                        <Dashboard refreshTrigger={refreshKey} globalSearch={globalSearch} isAdmin={isAdmin} />
+                        <Dashboard refreshTrigger={refreshKey} globalSearch={globalSearch} isAdmin={isAdmin} currentUser={currentUser} />
                     </>
                 )}
             </main>

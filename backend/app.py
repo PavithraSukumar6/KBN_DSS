@@ -60,8 +60,11 @@ def upload_file():
     file = request.files['file']
     container_id = request.form.get('container_id') # Get container ID
     batch_id = request.form.get('batch_id') # Get Batch ID if part of a batch
+    batch_id = request.form.get('batch_id') # Get Batch ID if part of a batch
     tags = request.form.get('tags') # New: Tags
     uploader_id = request.form.get('uploader_id', 'Gokul_Admin')
+    # Default confidentiality for now
+    confidentiality = request.form.get('confidentiality_level', 'Internal')
 
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
@@ -89,6 +92,12 @@ def upload_file():
                 # Create detailed record with 'Processing' status
                 # We use 'save_document' but we need to pass the new params.
                 # Since save_document signature was updated in db.py, we can use it.
+                # Note: save_document signature might not have confidentiality_level yet, need to update db.py save_document too?
+                # Actually, we migrated the column. let's check saving.
+                # db.py's save_document doesn't take confidentiality yet. 
+                # I should update save_document in db.py to accept it, OR update after save.
+                # For now, let's stick to update after.
+                
                 doc_id = save_document(
                     filename=filename,
                     category="Unclassified", # Placeholder
@@ -101,6 +110,13 @@ def upload_file():
                     tags=tags
                 )
                 
+                # Manually set confidentiality if not default
+                if confidentiality != 'Internal':
+                     conn = get_db_connection()
+                     conn.execute("UPDATE documents SET confidentiality_level = ? WHERE id = ?", (confidentiality, doc_id))
+                     conn.commit()
+                     conn.close()
+
                 results.append({
                     "id": doc_id,
                     "filename": filename,
@@ -115,6 +131,9 @@ def upload_file():
             # Get suggestions from filename for the first document as a hint
             initial_suggestions = suggest_metadata_from_all(os.path.basename(split_files[0])) if split_files else {}
 
+            from database.db import log_audit
+            log_audit('batch' if batch_id else 'document_group', batch_id or 0, 'UPLOAD', f"Uploaded {len(results)} documents", uploader_id)
+
             return jsonify({
                 "message": f"Started processing {len(results)} documents",
                 "documents": results,
@@ -124,6 +143,78 @@ def upload_file():
 
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+# --- SECURITY ENDPOINTS ---
+@app.route('/users', methods=['GET'])
+def get_users_route():
+    from database.db import get_users
+    return jsonify(get_users())
+
+@app.route('/access/request', methods=['POST'])
+def request_access_route():
+    from database.db import request_access
+    data = request.json
+    request_access(data['user_id'], data['document_id'], data['reason'])
+    return jsonify({"message": "Access request submitted"}), 200
+
+@app.route('/access/requests', methods=['GET'])
+def get_access_requests_route():
+    from database.db import get_access_requests
+    status = request.args.get('status', 'Pending')
+    return jsonify(get_access_requests(status))
+
+@app.route('/access/approve', methods=['POST'])
+def approve_access_route():
+    from database.db import process_access_request
+    data = request.json
+    process_access_request(data['request_id'], data['status'], data['reviewer'], data.get('expiry_date'))
+    return jsonify({"message": f"Request {data['status']}"}), 200
+
+@app.route('/view/<int:doc_id>', methods=['GET'])
+def view_document_route(doc_id):
+    from database.db import get_document, log_audit, get_db_connection
+    doc = get_document(doc_id)
+    if not doc:
+        return jsonify({"error": "Document not found"}), 404
+    
+    user_id = request.args.get('user_id', 'Guest')
+    is_admin = request.args.get('is_admin', 'false').lower() == 'true'
+
+    # Security Check
+    conf = doc.get('confidentiality_level', 'Internal')
+    uploader = doc.get('uploader_id')
+
+    # If document is Restricted/Confidential
+    if conf == 'Restricted' or conf == 'Confidential':
+        # Allow if Admin or Owner
+        allowed = is_admin or (user_id == uploader)
+        
+        # Check Access Request if not allowed yet
+        if not allowed:
+             conn = get_db_connection()
+             req = conn.execute("SELECT status FROM access_requests WHERE user_id = ? AND document_id = ? AND status = 'Approved'", (user_id, doc_id)).fetchone()
+             if req:
+                 allowed = True
+             conn.close()
+             
+        if not allowed:
+            return "Access Denied. Restricted Document.", 403
+
+    
+    # Log the View
+    if conf != 'Internal':
+        log_audit('document', doc_id, 'VIEW_RESTRICTED', f"User {user_id} viewed restricted doc", user_id)
+    else:
+        log_audit('document', doc_id, 'VIEW', f"Document viewed by {user_id}", user_id)
+    
+    # Determine path (Uploads or Processed)
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filename'])
+    if not os.path.exists(file_path):
+        file_path = os.path.join(app.config['PROCESSED_FOLDER'], doc['filename'])
+        if not os.path.exists(file_path):
+            return jsonify({"error": "File not found on disk"}), 404
+            
+    return send_file(file_path)
 
 def process_document_background(doc_id, filepath):
     """

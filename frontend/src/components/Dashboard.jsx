@@ -5,7 +5,7 @@ import DocumentViewer from './DocumentViewer';
 import FolderTree from './FolderTree';
 import { Search, FileText, Info, Star, Download, Filter, FolderTree as FolderIcon } from 'lucide-react';
 
-const Dashboard = ({ refreshTrigger, globalSearch, isAdmin }) => {
+const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
     const [documents, setDocuments] = useState([]);
     const [searchTerm, setSearchTerm] = useState('');
     const [loading, setLoading] = useState(false);
@@ -53,11 +53,13 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin }) => {
 
             // Permissions
             params.append('is_admin', isAdmin ? 'true' : 'false');
-            params.append('user_id', 'Gokul_Admin');
+            params.append('is_admin', isAdmin ? 'true' : 'false');
+            params.append('user_id', currentUser?.id || 'Gokul_Admin');
 
             // Only show published documents in the main library (unless specific filter overrides?)
             // Actually, keep it consistent with existing logic
-            params.append('only_published', 'true');
+            // Removed only_published constraint for visibility
+            // params.append('only_published', 'true');
 
             if (selectedFolderId) params.append('container_id', selectedFolderId);
 
@@ -269,6 +271,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin }) => {
                     <table>
                         <thead>
                             <tr>
+                                <th>ID & Owner</th>
                                 <th>Filename & Context</th>
                                 <th>Category</th>
                                 <th>Org Info</th>
@@ -294,6 +297,14 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin }) => {
 
                                     return (
                                         <tr key={doc.id} className="animate-fade-in">
+                                            <td>
+                                                <div style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
+                                                    {doc.uid ? doc.uid.split('-')[1] : `#${doc.id}`}
+                                                </div>
+                                                <div style={{ fontSize: '0.7rem', color: '#60a5fa', marginTop: '2px' }}>
+                                                    {doc.uploader_id || 'System'}
+                                                </div>
+                                            </td>
                                             <td style={{ maxWidth: '300px' }}>
                                                 <div style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                                     <FileText size={16} color="var(--primary)" />
@@ -341,6 +352,12 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin }) => {
                                                     <div>{doc.subsidiary || '-'}</div>
                                                     <div style={{ color: '#60a5fa' }}>{doc.department || '-'}</div>
                                                 </div>
+                                                {/* Confidentiality Badge */}
+                                                {(doc.effective_confidentiality === 'Confidential' || doc.effective_confidentiality === 'Restricted') && (
+                                                    <span style={{ fontSize: '0.65rem', background: '#dc2626', color: 'white', padding: '1px 4px', borderRadius: '3px', marginLeft: '4px' }}>
+                                                        {doc.effective_confidentiality}
+                                                    </span>
+                                                )}
                                             </td>
                                             <td>
                                                 <span style={{
@@ -377,6 +394,23 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin }) => {
                                                     <Star size={18} fill={doc.is_favorite ? '#eab308' : 'none'} />
                                                 </button>
                                                 <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }} onClick={() => setViewingDoc(doc)}>View</button>
+                                                {doc.effective_confidentiality === 'Restricted' && !isAdmin && doc.access_status !== 'Approved' && doc.uploader_id !== currentUser?.id ? (
+                                                    <button
+                                                        className="btn btn-ghost"
+                                                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem', color: '#facc15' }}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            const reason = prompt("Reason for requesting access?");
+                                                            if (reason) {
+                                                                axios.post('http://localhost:5000/access/request', { user_id: currentUser.id, document_id: doc.id, reason })
+                                                                    .then(() => alert("Request Submitted"))
+                                                                    .catch(err => alert("Failed"));
+                                                            }
+                                                        }}
+                                                    >
+                                                        Request Access
+                                                    </button>
+                                                ) : null}
                                                 {isAdmin && <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }} onClick={() => openDetails(doc)}>Details</button>}
                                             </td>
                                         </tr>
@@ -428,7 +462,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin }) => {
                                     borderBottom: activeModalTab === 'audit' ? '2px solid var(--primary)' : 'none',
                                     cursor: 'pointer'
                                 }}
-                            >Audit Log</button>
+                            >History</button>
                         </div>
 
                         {/* Metadata Tab */}

@@ -55,7 +55,7 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
 
     const isPDF = doc.filename.toLowerCase().endsWith('.pdf');
     const isImage = /\.(jpg|jpeg|png|gif)$/i.test(doc.filename);
-    const fileUrl = `http://localhost:5000/uploads/${doc.filename}`; // This assumes static serving or proxy
+    const fileUrl = `http://localhost:5000/view/${doc.id}?user_id=${user_id}`; // Tracked View Endpoint
 
     return (
         <div style={{
@@ -119,7 +119,7 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
                     display: 'flex', flexDirection: 'column'
                 }}>
                     <div style={{ display: 'flex', borderBottom: '1px solid var(--glass-border)' }}>
-                        {['metadata', 'versions', 'audit'].map(tab => (
+                        {['metadata', 'versions', 'history'].map(tab => (
                             <button
                                 key={tab}
                                 onClick={() => setActiveTab(tab)}
@@ -187,7 +187,7 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
                             </div>
                         )}
 
-                        {activeTab === 'audit' && (
+                        {activeTab === 'history' && (
                             <div className="animate-fade-in">
                                 {auditLogs.length > 0 ? auditLogs.map(log => (
                                     <div key={log.id} style={{

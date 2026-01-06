@@ -15,7 +15,7 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
     const [operator] = useState('Gokul_Admin');
     const [department] = useState('Finance');
     const [docType, setDocType] = useState('');
-    const [selectedDepartment, setSelectedDepartment] = useState('Finance');
+    const [selectedDepartment, setSelectedDepartment] = useState('');
     const [docDate, setDocDate] = useState(new Date().toISOString().split('T')[0]);
     const [generalSuggestions, setGeneralSuggestions] = useState(null);
 
@@ -99,7 +99,13 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
             const result = await uploadFile(fileObj);
             if (result.status === 'success' && result.result.suggestions) {
                 setGeneralSuggestions(result.result.suggestions);
-                // Also auto-set department if suggested
+
+                // Auto-set Doc Type if suggested
+                if (result.result.suggestions.category) {
+                    setDocType(result.result.suggestions.category);
+                }
+
+                // Auto-set Department if suggested
                 if (result.result.suggestions.department) {
                     setSelectedDepartment(result.result.suggestions.department);
                 }
@@ -136,6 +142,7 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
                 <div>
                     <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem' }}>Department</label>
                     <select className="input" value={selectedDepartment} onChange={e => setSelectedDepartment(e.target.value)} style={{ width: '100%' }}>
+                        <option value="">Auto-Detect</option>
                         {taxonomy.filter(t => t.category === 'Department').map(t => <option key={t.id} value={t.value}>{t.value}</option>)}
                     </select>
                 </div>

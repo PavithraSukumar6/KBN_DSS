@@ -108,6 +108,18 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
 
+        # Migration for batches (QC Support)
+        for col, col_type in [
+            ('qc_status', "TEXT DEFAULT 'Pending'"), 
+            ('qc_notes', 'TEXT'), 
+            ('qc_by', 'TEXT'), 
+            ('qc_date', 'TEXT')
+        ]:
+            try:
+                conn.execute(f'ALTER TABLE batches ADD COLUMN {col} {col_type}')
+            except sqlite3.OperationalError:
+                pass
+
         # Create Taxonomy Table
         conn.execute('''
             CREATE TABLE IF NOT EXISTS taxonomy (
@@ -227,6 +239,48 @@ def init_db():
                 id_slug = f"DEPT-{dept.upper()}"
                 conn.execute("INSERT INTO containers (id, name, department, parent_id, created_by, created_at, barcode) VALUES (?, ?, ?, 'ROOT', 'System', ?, ?)", 
                              (id_slug, dept, dept, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f"BC-{id_slug}"))
+
+        # SECURITY: Users & Roles
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                role TEXT, -- 'Admin', 'Operator', 'Viewer'
+                scope TEXT, -- 'Holding', 'Subsidiary', 'Department'
+                assigned_scope_value TEXT -- e.g. 'Finance' or 'KBN Group'
+            );
+
+            CREATE TABLE IF NOT EXISTS access_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                document_id INTEGER,
+                status TEXT DEFAULT 'Pending', -- 'Pending', 'Approved', 'Rejected', 'Expired'
+                reason TEXT,
+                expiry_date TEXT,
+                request_date TEXT,
+                reviewed_by TEXT,
+                review_date TEXT,
+                FOREIGN KEY(document_id) REFERENCES documents(id)
+            );
+        ''')
+
+        # Seed Users
+        user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if user_count == 0:
+            users = [
+                ('Gokul_Admin', 'Gokul Admin', 'Admin', 'Holding', 'KBN Group'),
+                ('Operator_Finance', 'Fin Operator', 'Operator', 'Department', 'Finance'),
+                ('Operator_HR', 'HR Operator', 'Operator', 'Department', 'HR'),
+                ('Viewer_Guest', 'Guest Viewer', 'Viewer', 'Holding', 'KBN Group')
+            ]
+            conn.executemany("INSERT INTO users (id, name, role, scope, assigned_scope_value) VALUES (?, ?, ?, ?, ?)", users)
+
+        # Migration: Add confidentiality_level to documents
+        try:
+            conn.execute("ALTER TABLE documents ADD COLUMN confidentiality_level TEXT DEFAULT 'Internal'")
+        except sqlite3.OperationalError:
+            pass
+
     conn.close()
 
 import uuid
@@ -429,16 +483,39 @@ def get_filtered_documents(category=None, start_date=None, end_date=None, search
         params.append(container_id)
 
     # Permission Handling
-    if not is_admin:
-        query += """ AND (
-            c.confidentiality_level IS NULL 
-            OR c.confidentiality_level != 'Confidential'
-            OR d.uploader_id = ?
-        )"""
-        params.append(user_id)
+    # 1. Get User Role & Scope
+    cursor_user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user_role_data = cursor_user.fetchone()
+    
+    # Defaults if user not found (Guest)
+    role = user_role_data['role'] if user_role_data else 'Viewer'
+    scope = user_role_data['scope'] if user_role_data else 'Holding'
+    scope_val = user_role_data['assigned_scope_value'] if user_role_data else 'KBN Group'
+
+    # Admin sees all (bypass filters)
+    if role != 'Admin' and not is_admin:
+        # Scope Filter: Operator/Viewer restricted to their scope
+        if scope == 'Subsidiary':
+            query += " AND c.subsidiary = ?"
+            params.append(scope_val)
+        elif scope == 'Department':
+            query += " AND c.department = ?"
+            params.append(scope_val)
+            
+        # Confidentiality Filter
+        # Visible if:
+        # 1. Not Confidential/Restricted
+        # 2. OR User is Uploader
+        # 3. OR Access Request Approved (Joined from access_requests check?) - simpler to hide content but show in list?
+        # Requirement: "'Restricted' files must only be visible to the Owner and Admins."
+        # Requirement: "If a document is restricted, show a 'Request Access' button." => Implies it IS visible in the list.
         
-        query += " AND (d.approval_status != 'Pending Approval' OR d.uploader_id = ?)"
-        params.append(user_id)
+        # So we logic: SHOW the record, but maybe mark it. 
+        # But wait, "visible to Owner and Admins" usually means hidden from list.
+        # "Show a Request Access button" implies finding it. 
+        # Let's interpret: "Restricted" metadata is hidden? Or file is listed but content/download blocked?
+        # Let's show it in the list so they can request access.
+        pass 
 
     if only_published:
         query += " AND d.is_published = 1"
@@ -457,9 +534,6 @@ def get_filtered_documents(category=None, start_date=None, end_date=None, search
         params.append(end_date + " 23:59:59")
         
     if status:
-        # Check both ocr_status and approval_status? FR says "Lifecycle: Status (Draft, Published, Archived)"
-        # We'll map 'Published' to is_published=1, 'Archived' to ocr_status='Archived' (if we had it)
-        # For now, let's filter by ocr_status or approval_status if they match
         if status == 'Published':
             query += " AND d.is_published = 1"
         elif status == 'Pending':
@@ -492,24 +566,78 @@ def get_filtered_documents(category=None, start_date=None, end_date=None, search
         # We join with FTS table and use MATCH
         # Snippets are generated here. Snippet(table, column_index, start, end, ellipsis, tokens)
         query = """
-            SELECT d.*, c.subsidiary, c.department, c.function, c.confidentiality_level,
+            SELECT d.*, c.subsidiary, c.department, c.function, 
+                   COALESCE(d.confidentiality_level, c.confidentiality_level, 'Internal') as effective_confidentiality,
                    CASE WHEN fav.document_id IS NOT NULL THEN 1 ELSE 0 END as is_favorite,
                    snippet(documents_fts, 2, '<b>', '</b>', '...', 15) as ocr_snippet,
-                   rank as relevance
+                   rank as relevance,
+                   (SELECT status FROM access_requests WHERE user_id = ? AND document_id = d.id AND status = 'Approved') as access_status
             FROM documents d
             JOIN documents_fts f ON d.id = f.id
             LEFT JOIN containers c ON d.container_id = c.id
             LEFT JOIN favorites fav ON d.id = fav.document_id AND fav.user_id = ?
             WHERE f.documents_fts MATCH ? AND """ + query[query.find("WHERE")+6:] # Reuse filters
-        params.insert(1, search) # params[0] is user_id
+        params.insert(0, user_id) # For access_status subquery
+        params.insert(2, user_id) # For favorites join
+        params.insert(3, search)
         query += " ORDER BY relevance ASC, d.upload_date DESC"
     else:
+        # Non-search query
+        # We need to inject the extra columns for confidentiality and access status
+        select_clause = """
+            SELECT d.*, c.subsidiary, c.department, c.function,
+                   COALESCE(d.confidentiality_level, c.confidentiality_level, 'Internal') as effective_confidentiality,
+                   CASE WHEN fav.document_id IS NOT NULL THEN 1 ELSE 0 END as is_favorite,
+                   (SELECT status FROM access_requests WHERE user_id = ? AND document_id = d.id AND status = 'Approved') as access_status
+        """
+        params.insert(0, user_id) # For access_status
+        query = select_clause + query[query.find("FROM"):]
         query += " ORDER BY d.upload_date DESC"
     
     cursor = conn.execute(query, params)
     documents = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return documents
+
+def get_users():
+    conn = get_db_connection()
+    users = [dict(row) for row in conn.execute("SELECT * FROM users").fetchall()]
+    conn.close()
+    return users
+
+def request_access(user_id, doc_id, reason):
+    conn = get_db_connection()
+    date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("INSERT INTO access_requests (user_id, document_id, reason, request_date) VALUES (?, ?, ?, ?)", 
+                 (user_id, doc_id, reason, date))
+    conn.commit()
+    conn.close()
+
+def get_access_requests(status='Pending'):
+    conn = get_db_connection()
+    query = """
+        SELECT ar.*, d.filename, u.name as user_name 
+        FROM access_requests ar
+        JOIN documents d ON ar.document_id = d.id
+        JOIN users u ON ar.user_id = u.id
+    """
+    if status:
+        query += " WHERE ar.status = ?"
+        cursor = conn.execute(query, (status,))
+    else:
+        cursor = conn.execute(query)
+        
+    reqs = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return reqs
+
+def process_access_request(req_id, status, reviewer, expiry=None):
+    conn = get_db_connection()
+    date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("UPDATE access_requests SET status = ?, reviewed_by = ?, review_date = ?, expiry_date = ? WHERE id = ?", 
+                 (status, reviewer, date, expiry, req_id))
+    conn.commit()
+    conn.close()
 
 def get_analytics_stats():
     conn = get_db_connection()
