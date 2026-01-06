@@ -70,7 +70,11 @@ def init_db():
                 action TEXT,
                 details TEXT,
                 performed_by TEXT,
-                timestamp TEXT
+                timestamp TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                ip_address TEXT,
+                scope TEXT
             );
 
             CREATE TABLE IF NOT EXISTS approval_policies (
@@ -169,7 +173,11 @@ def init_db():
                 action TEXT,
                 details TEXT,
                 performed_by TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                old_value TEXT,
+                new_value TEXT,
+                ip_address TEXT,
+                scope TEXT
             );
 
             CREATE TABLE IF NOT EXISTS favorites (
@@ -186,6 +194,22 @@ def init_db():
                 query_params TEXT,
                 is_public INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        ''')
+
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS retention_policies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_type TEXT UNIQUE,
+                retention_years INTEGER,
+                action TEXT DEFAULT 'Archive', -- 'Archive', 'Delete'
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
         ''')
 
@@ -278,10 +302,32 @@ def init_db():
         # Migration: Add confidentiality_level to documents
         try:
             conn.execute("ALTER TABLE documents ADD COLUMN confidentiality_level TEXT DEFAULT 'Internal'")
+            conn.execute("ALTER TABLE documents ADD COLUMN confidentiality_level TEXT DEFAULT 'Internal'")
         except sqlite3.OperationalError:
             pass
 
+        # Migration: Add extended audit fields
+        for col in ['old_value', 'new_value', 'ip_address', 'scope']:
+            try:
+                conn.execute(f'ALTER TABLE audit_log ADD COLUMN {col} TEXT')
+            except sqlite3.OperationalError:
+                pass
+
     conn.close()
+
+    # Post-Migration: Add status column logic separate from main block if needed, 
+    conn = get_db_connection()
+    try:
+        conn.execute("ALTER TABLE documents ADD COLUMN status TEXT DEFAULT 'Intake'")
+        # Sync old ocr_status to new status if needed
+        conn.execute("UPDATE documents SET status = 'Published' WHERE ocr_status = 'Completed' AND status = 'Intake'")
+         # Seed System Settings
+        conn.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('legal_hold', 'false')")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
 
 import uuid
 import random
@@ -416,16 +462,60 @@ def update_batch_qc(batch_id, status, notes, user):
     conn.commit()
     conn.close()
 
-def log_audit(entity_type, entity_id, action, details, user):
+def log_audit(entity_type, entity_id, action, details, user, old_value=None, new_value=None, ip_address=None, scope=None):
     conn = get_db_connection()
     cursor = conn.cursor()
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
-        INSERT INTO audit_log (entity_type, entity_id, action, details, performed_by, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (entity_type, entity_id, action, details, user, timestamp))
+        INSERT INTO audit_log (entity_type, entity_id, action, details, performed_by, timestamp, old_value, new_value, ip_address, scope)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (entity_type, entity_id, action, details, user, timestamp, old_value, new_value, ip_address, scope))
     conn.commit()
     conn.close()
+
+def get_audit_logs(filters=None):
+    conn = get_db_connection()
+    query = "SELECT * FROM audit_log WHERE 1=1"
+    params = []
+    
+    if filters:
+        if filters.get('user'):
+            query += " AND performed_by LIKE ?"
+            params.append(f"%{filters['user']}%")
+        if filters.get('action'):
+            query += " AND action = ?"
+            params.append(filters['action'])
+        if filters.get('entity_type'):
+            query += " AND entity_type = ?"
+            params.append(filters['entity_type'])
+        if filters.get('start_date'):
+            query += " AND timestamp >= ?"
+            params.append(filters['start_date'])
+        if filters.get('end_date'):
+            query += " AND timestamp <= ?"
+            params.append(filters['end_date'] + " 23:59:59")
+            
+    query += " ORDER BY timestamp DESC LIMIT 500"
+    logs = [dict(row) for row in conn.execute(query, params).fetchall()]
+    conn.close()
+    return logs
+
+def get_restricted_access_report(days=30):
+    conn = get_db_connection()
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    query = """
+        SELECT al.*, d.filename, d.confidentiality_level 
+        FROM audit_log al
+        JOIN documents d ON al.entity_id = d.id
+        WHERE al.entity_type = 'document' 
+          AND al.action LIKE 'VIEW%'
+          AND al.timestamp >= ?
+          AND (d.confidentiality_level = 'Confidential' OR d.confidentiality_level = 'Restricted')
+        ORDER BY al.timestamp DESC
+    """
+    report = [dict(row) for row in conn.execute(query, (start_date,)).fetchall()]
+    conn.close()
+    return report
 
 def update_document_metadata(doc_id, category, metadata, template_type, user='System'):
     # FR-13: Preserve historical data before update

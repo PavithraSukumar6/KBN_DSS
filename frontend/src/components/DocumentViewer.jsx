@@ -153,6 +153,16 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
                                         }}>
                                             {doc.approval_status || 'Pending'}
                                         </span>
+                                        {doc.status && doc.status !== 'Published' && (
+                                            <span style={{
+                                                marginLeft: '0.5rem',
+                                                background: doc.status === 'Archived' ? 'rgba(96, 165, 250, 0.2)' : doc.status === 'Soft_Deleted' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(255,255,255,0.1)',
+                                                color: doc.status === 'Archived' ? '#60a5fa' : doc.status === 'Soft_Deleted' ? '#f87171' : 'var(--text-muted)',
+                                                padding: '0.4rem 0.8rem', borderRadius: '20px', fontSize: '0.85rem'
+                                            }}>
+                                                {doc.status.replace('_', ' ')}
+                                            </span>
+                                        )}
                                     </div>
                                 </section>
 

@@ -6,7 +6,10 @@ import ContainerManager from './components/ContainerManager';
 import QCQueue from './components/QCQueue';
 import AnalyticsView from './components/AnalyticsView';
 import GovernanceDashboard from './components/GovernanceDashboard';
-import { LayoutDashboard, Box, ScanLine, Microscope, BarChart3, Shield, User, UserCheck } from 'lucide-react';
+import GovernanceDashboard from './components/GovernanceDashboard';
+import AuditCenter from './components/AuditCenter';
+import CleanupReviews from './components/CleanupReviews';
+import { LayoutDashboard, Box, ScanLine, Microscope, BarChart3, Shield, User, UserCheck, Activity, Trash2 } from 'lucide-react';
 
 function App() {
     const [refreshKey, setRefreshKey] = useState(0);
@@ -150,6 +153,22 @@ function App() {
                 >
                     <Shield size={20} /> Governance
                 </button>
+                <button
+                    onClick={() => setActiveTab('audit')}
+                    className={`btn ${activeTab === 'audit' ? '' : 'btn-ghost'} `}
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: activeTab === 'audit' ? '#3b82f6' : 'transparent' }}
+                >
+                    <Activity size={20} /> Audit Center
+                </button>
+                {isAdmin && (
+                    <button
+                        onClick={() => setActiveTab('cleanup')}
+                        className={`btn ${activeTab === 'cleanup' ? '' : 'btn-ghost'} `}
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: activeTab === 'cleanup' ? '#3b82f6' : 'transparent', color: '#f87171' }}
+                    >
+                        <Trash2 size={20} /> Cleanup
+                    </button>
+                )}
             </div>
 
             <main>
@@ -164,6 +183,10 @@ function App() {
                     <AnalyticsView />
                 ) : activeTab === 'governance' ? (
                     <GovernanceDashboard />
+                ) : activeTab === 'audit' ? (
+                    <AuditCenter currentUser={currentUser} />
+                ) : activeTab === 'cleanup' ? (
+                    <CleanupReviews currentUser={currentUser} />
                 ) : (
                     <>
                         <DigitizationPipeline onUploadSuccess={handleUploadSuccess} />

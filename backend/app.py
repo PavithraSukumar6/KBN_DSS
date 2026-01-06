@@ -132,7 +132,7 @@ def upload_file():
             initial_suggestions = suggest_metadata_from_all(os.path.basename(split_files[0])) if split_files else {}
 
             from database.db import log_audit
-            log_audit('batch' if batch_id else 'document_group', batch_id or 0, 'UPLOAD', f"Uploaded {len(results)} documents", uploader_id)
+            log_audit('batch' if batch_id else 'document_group', batch_id or 0, 'UPLOAD', f"Uploaded {len(results)} documents", uploader_id, ip_address=request.remote_addr)
 
             return jsonify({
                 "message": f"Started processing {len(results)} documents",
@@ -168,6 +168,10 @@ def approve_access_route():
     from database.db import process_access_request
     data = request.json
     process_access_request(data['request_id'], data['status'], data['reviewer'], data.get('expiry_date'))
+    
+    from database.db import log_audit
+    log_audit('access_request', data['request_id'], 'ACCESS_REVIEW', f"Request {data['status']} by {data['reviewer']}", data['reviewer'], ip_address=request.remote_addr, scope='Security')
+    
     return jsonify({"message": f"Request {data['status']}"}), 200
 
 @app.route('/view/<int:doc_id>', methods=['GET'])
@@ -203,9 +207,9 @@ def view_document_route(doc_id):
     
     # Log the View
     if conf != 'Internal':
-        log_audit('document', doc_id, 'VIEW_RESTRICTED', f"User {user_id} viewed restricted doc", user_id)
+        log_audit('document', doc_id, 'VIEW_RESTRICTED', f"User {user_id} viewed restricted doc", user_id, ip_address=request.remote_addr)
     else:
-        log_audit('document', doc_id, 'VIEW', f"Document viewed by {user_id}", user_id)
+        log_audit('document', doc_id, 'VIEW', f"Document viewed by {user_id}", user_id, ip_address=request.remote_addr)
     
     # Determine path (Uploads or Processed)
     file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filename'])
@@ -523,7 +527,7 @@ def search():
     department = request.args.get('department')
     
     # Use the enhanced filtering logic
-    from database.db import get_filtered_documents
+    from database.db import get_filtered_documents, log_audit
     results = get_filtered_documents(
         search=query, 
         user_id=user_id, 
@@ -538,86 +542,17 @@ def search():
     if not is_admin:
         results = [d for d in results if d.get('approval_status') != 'Pending Approval']
         
+    # Log 0 results with context (FR-26)
+    if len(results) == 0:
+        log_audit(
+            'search', 0, 'SEARCH_ZERO_RESULTS', 
+            f"Query '{query}' returned 0 results. Filters: Cat={category}, Sub={subsidiary}", 
+            user_id, 
+            ip_address=request.remote_addr,
+            scope='Global Search'
+        )
+
     return jsonify(results)
-
-@app.route('/documents/<int:doc_id>/publish', methods=['POST'])
-def publish_doc_route(doc_id):
-    from database.db import publish_document, log_audit
-    user = request.args.get('user', 'QA_User')
-    
-    publish_document(doc_id)
-    log_audit('document', doc_id, 'publish', "Document published to library", user)
-    
-    return jsonify({"message": "Document published successfully"}), 200
-
-@app.route('/documents/<int:doc_id>/versions', methods=['GET'])
-def get_doc_versions_route(doc_id):
-    from database.db import get_document_versions
-    versions = get_document_versions(doc_id)
-    return jsonify(versions)
-
-@app.route('/documents/<int:doc_id>/rescan', methods=['POST'])
-def rescan_document(doc_id):
-    from database.db import get_document, save_document_version, log_audit
-    data = request.json
-    reason = data.get('reason', 'Manual Rescan')
-    user = data.get('user', 'Operator')
-    
-    doc = get_document(doc_id)
-    if not doc:
-        return jsonify({"error": "Document not found"}), 404
-        
-    # 1. Save current state as historical version
-    save_document_version(doc_id, reason, user)
-    
-    # 2. Reset status and trigger re-processing
-    # We assume the file still exists in 'uploads' or 'processed_docs'
-    # For this demo, we'll try to find it in uploads
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], doc['filename'])
-    
-    if not os.path.exists(filepath):
-         return jsonify({"error": "Original file not found for rescan"}), 404
-         
-    # Update status to Processing
-    update_document_status(doc_id, "Processing", "Rescan in progress...", 0.0, doc['category'])
-    
-    # Start background thread
-    thread = threading.Thread(target=process_document_background, args=(doc_id, filepath))
-    thread.daemon = True
-    thread.start()
-    
-    log_audit('document', doc_id, 'rescan', f"Triggered rescan: {reason}", user)
-    
-    return jsonify({"message": "Rescan triggered", "id": doc_id}), 200
-
-@app.route('/qc/queue', methods=['GET'])
-def get_qc_queue():
-    conn = get_db_connection()
-    # Get batches that are Pending QC (or just Pending generally if we treat all new as needing QC)
-    # We will fetch 'Pending' status.
-    batches = conn.execute("SELECT * FROM batches WHERE qc_status IN ('Pending', 'QC Pending') ORDER BY start_time DESC").fetchall()
-    
-    # Enrich with some stats? (e.g. operator name from log?)
-    results = [dict(row) for row in batches]
-    conn.close()
-    return jsonify(results)
-
-@app.route('/qc/batch/<int:batch_id>/review', methods=['POST'])
-def review_batch(batch_id):
-    data = request.json
-    status = data.get('status') # 'Archived' or 'Returned'
-    notes = data.get('notes', '')
-    user = data.get('user', 'QA_User') # Placeholder for auth
-    
-    if status not in ['Archived', 'Returned']:
-        return jsonify({"error": "Invalid status"}), 400
-        
-    from database.db import update_batch_qc, log_audit
-    
-    update_batch_qc(batch_id, status, notes, user)
-    log_audit('batch', batch_id, 'qc_review', f"Status set to {status}. Notes: {notes}", user)
-    
-    return jsonify({"message": f"Batch {status}"}), 200
 
 @app.route('/documents/<int:doc_id>/reclassify', methods=['POST'])
 def reclassify_document_route(doc_id):
@@ -625,6 +560,9 @@ def reclassify_document_route(doc_id):
     new_category = data.get('category')
     user = data.get('user', 'System_User')
     
+    if check_legal_hold():
+         return jsonify({"error": "Legal Hold Active: Metadata changes are prohibited."}), 403
+
     if not new_category:
          return jsonify({"error": "Category required"}), 400
          
@@ -634,66 +572,173 @@ def reclassify_document_route(doc_id):
     doc = get_document(doc_id)
     if not doc:
         return jsonify({"error": "Doc not found"}), 404
-        
+    
+    old_category = doc['category']    
     # Re-extract
     new_metadata = extract_metadata(doc['content'], new_category)
     template = new_category + " Template"
     
     update_document_metadata(doc_id, new_category, new_metadata, template)
-    log_audit('document', doc_id, 'reclassify', f"Changed from {doc['category']} to {new_category}", user)
+    
+    # Enhanced Logging (FR-25)
+    log_audit('document', doc_id, 'reclassify', f"Changed category", user, old_value=old_category, new_value=new_category, ip_address=request.remote_addr)
     
     return jsonify({"message": "Reclassified", "metadata": new_metadata}), 200
-    
-@app.route('/documents/<int:doc_id>/approve', methods=['POST'])
-def approve_doc(doc_id):
-    user = request.args.get('user', 'Approver')
-    publish_document(doc_id) # This helper also sets status to Approved
-    return jsonify({"message": "Document approved and published"}), 200
 
-@app.route('/documents/<int:doc_id>/reject', methods=['POST'])
-def reject_doc(doc_id):
-    data = request.json
-    reason = data.get('reason', 'No reason provided')
-    user = data.get('user', 'Approver')
-    update_approval_status(doc_id, "Rejected", user, reason)
-    return jsonify({"message": "Document rejected"}), 200
-
-@app.route('/documents/<int:doc_id>/request_changes', methods=['POST'])
-def request_changes_doc(doc_id):
-    data = request.json
-    comments = data.get('comments', 'Changes requested')
-    user = data.get('user', 'Approver')
-    update_approval_status(doc_id, "Changes Requested", user, comments)
-    return jsonify({"message": "Changes requested"}), 200
-
-@app.route('/documents/<int:doc_id>/versions', methods=['GET'])
-def get_versions_route(doc_id):
-    versions = get_document_versions(doc_id)
-    return jsonify(versions)
-
-@app.route('/audit/document/<int:doc_id>', methods=['GET'])
-def get_doc_audit(doc_id):
-    conn = get_db_connection()
-    cursor = conn.execute("SELECT * FROM audit_log WHERE entity_type = 'document' AND entity_id = ? ORDER BY timestamp DESC", (doc_id,))
-    logs = [dict(row) for row in cursor.fetchall()]
-    conn.close()
+# --- AUDIT & REPORTING ENDPOINTS ---
+@app.route('/audit/logs', methods=['GET'])
+def get_audit_logs_route():
+    from database.db import get_audit_logs
+    filters = {
+        'user': request.args.get('user'),
+        'action': request.args.get('action'),
+        'entity_type': request.args.get('entity_type'),
+        'start_date': request.args.get('start_date'),
+        'end_date': request.args.get('end_date')
+    }
+    # Filter out empty keys
+    filters = {k: v for k, v in filters.items() if v}
+    logs = get_audit_logs(filters)
     return jsonify(logs)
 
-@app.route('/policies', methods=['GET', 'POST'])
-def manage_policies():
-    from database.db import get_approval_policies
+@app.route('/audit/reports/restricted', methods=['GET'])
+def get_restricted_report_route():
+    from database.db import get_restricted_access_report
+    days = int(request.args.get('days', 30))
+    days = int(request.args.get('days', 30))
+    report = get_restricted_access_report(days)
+    return jsonify(report)
+
+# --- LIFECYCLE & RETENTION ENDPOINTS ---
+
+def check_legal_hold():
+    from database.db import get_db_connection
+    conn = get_db_connection()
+    row = conn.execute("SELECT value FROM system_settings WHERE key = 'legal_hold'").fetchone()
+    conn.close()
+    return row and row['value'] == 'true'
+
+@app.route('/retention-policies', methods=['GET', 'POST'])
+def manage_retention_policies():
+    conn = get_db_connection()
     if request.method == 'POST':
+        # Admin check
+        is_admin = request.args.get('is_admin', 'false').lower() == 'true'
+        if not is_admin:
+            conn.close()
+            return jsonify({"error": "Admin access required"}), 403
+            
         data = request.json
-        conn = get_db_connection()
-        conn.execute("INSERT INTO approval_policies (match_type, match_value) VALUES (?, ?)", (data['match_type'], data['match_value']))
-        conn.commit()
+        doc_type = data.get('document_type')
+        years = data.get('retention_years')
+        
+        try:
+            conn.execute('''
+                INSERT INTO retention_policies (document_type, retention_years) 
+                VALUES (?, ?)
+                ON CONFLICT(document_type) DO UPDATE SET retention_years=excluded.retention_years
+            ''', (doc_type, years))
+            conn.commit()
+            log_audit('retention_policy', 0, 'UPDATE_POLICY', f"Set retention for {doc_type} to {years} years", "Admin")
+            return jsonify({"message": "Policy updated"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        finally:
+            conn.close()
+            
+    policies = [dict(row) for row in conn.execute("SELECT * FROM retention_policies").fetchall()]
+    conn.close()
+    return jsonify(policies)
+
+@app.route('/settings/legal-hold', methods=['POST'])
+def toggle_legal_hold():
+    is_admin = request.args.get('is_admin', 'false').lower() == 'true'
+    if not is_admin:
+        return jsonify({"error": "Admin access required"}), 403
+        
+    data = request.json
+    active = str(data.get('active', 'false')).lower()
+    
+    conn = get_db_connection()
+    conn.execute("INSERT INTO system_settings (key, value) VALUES ('legal_hold', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (active,))
+    conn.commit()
+    conn.close()
+    
+    log_audit('system', 0, 'LEGAL_HOLD', f"Legal Hold set to {active}", "Admin", scope='Legal')
+    return jsonify({"message": f"Legal Hold is now {active}"}), 200
+
+@app.route('/settings', methods=['GET'])
+def get_system_settings():
+    conn = get_db_connection()
+    settings = {row['key']: row['value'] for row in conn.execute("SELECT * FROM system_settings").fetchall()}
+    conn.close()
+    return jsonify(settings)
+
+@app.route('/documents/<int:doc_id>', methods=['DELETE'])
+def delete_document(doc_id):
+    # Check Legal Hold
+    if check_legal_hold():
+        log_audit('document', doc_id, 'DELETE_ATTEMPT', "Delete blocked by Legal Hold", "User", scope='Legal')
+        return jsonify({"error": "Legal Hold Active: Deletion is prohibited."}), 403
+        
+    user_id = request.args.get('user_id', 'Guest')
+    is_admin = request.args.get('is_admin', 'false').lower() == 'true'
+    is_permanent = request.args.get('permanent', 'false').lower() == 'true'
+    
+    conn = get_db_connection()
+    
+    # Check permissions (Owner or Admin)
+    doc = conn.execute("SELECT uploader_id, status FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc:
         conn.close()
-        return jsonify({"message": "Policy added"}), 201
-    return jsonify(get_approval_policies())
+        return jsonify({"error": "Not found"}), 404
+        
+    if not is_admin and doc['uploader_id'] != user_id:
+        conn.close()
+        return jsonify({"error": "Permission denied"}), 403
+        
+    if is_permanent:
+        if not is_admin:
+             conn.close()
+             return jsonify({"error": "Only Admins can permanently delete"}), 403
+             
+        # Check if it was soft deleted first? Or allow direct?
+        # Let's require soft delete status for permanent cleanup
+        if doc['status'] not in ['Pending_Deletion', 'Soft_Deleted']:
+             conn.close()
+             return jsonify({"error": "Document must be soft deleted first"}), 400
+             
+        conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        # Also clean up FTS
+        conn.execute("DELETE FROM documents_fts WHERE id = ?", (doc_id,))
+        conn.commit()
+        log_audit('document', doc_id, 'DELETE_PERMANENT', "Document permanently deleted", user_id)
+    else:
+        # Soft Delete
+        conn.execute("UPDATE documents SET status = 'Soft_Deleted' WHERE id = ?", (doc_id,))
+        conn.commit()
+        log_audit('document', doc_id, 'DELETE_SOFT', "Document moved to Recycle Bin", user_id)
+        
+    conn.close()
+    return jsonify({"message": "Document deleted"}), 200
+
+@app.route('/documents/<int:doc_id>/restore', methods=['POST'])
+def restore_document(doc_id):
+    if check_legal_hold():
+         return jsonify({"error": "Legal Hold Active: Changes are prohibited."}), 403
+
+    conn = get_db_connection()
+    conn.execute("UPDATE documents SET status = 'Published' WHERE id = ?", (doc_id,))
+    conn.commit()
+    conn.close()
+    
+    user_id = request.args.get('user_id', 'Admin')
+    log_audit('document', doc_id, 'RESTORE', "Document restored from recycle bin", user_id)
+    return jsonify({"message": "Restored"}), 200
 
 @app.route('/taxonomy', methods=['GET', 'POST'])
 def manage_taxonomy():
-    from database.db import get_taxonomy, add_taxonomy_item
+    from database.db import get_taxonomy, add_taxonomy_item, log_audit
     if request.method == 'POST':
         # Simple Admin check (in production this would use session/token)
         is_admin = request.args.get('is_admin', 'false').lower() == 'true'
@@ -703,11 +748,14 @@ def manage_taxonomy():
         data = request.json
         category = data.get('category')
         value = data.get('value')
+        user = 'Admin_User' # Mock
+        
         if not category or not value:
             return jsonify({"error": "Missing fields"}), 400
             
         success = add_taxonomy_item(category, value)
         if success:
+            log_audit('taxonomy', 0, 'ADD_TERM', f"Added {value} to {category}", user, new_value=value, scope='Governance', ip_address=request.remote_addr)
             return jsonify({"message": "Taxonomy item added"}), 201
         return jsonify({"error": "Item already exists"}), 409
         
@@ -857,7 +905,7 @@ def download_document(doc_id):
     # In production, this would be more robust.
     
     # Log the download activity
-    log_audit('document', doc_id, 'DOWNLOAD', f"Document downloaded by {user_id}", user_id)
+    log_audit('document', doc_id, 'DOWNLOAD', f"Document downloaded by {user_id}", user_id, ip_address=request.remote_addr)
     
     file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filename'])
     if not os.path.exists(file_path):
