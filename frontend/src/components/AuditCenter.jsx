@@ -15,6 +15,10 @@ const AuditCenter = ({ currentUser }) => {
         end_date: ''
     });
 
+    const getAuthHeaders = () => ({
+        headers: { 'X-Auth-Token': 'Gokul_Admin:Admin' }
+    });
+
     useEffect(() => {
         fetchLogs();
     }, [filters]);
@@ -23,7 +27,7 @@ const AuditCenter = ({ currentUser }) => {
         setLoading(true);
         try {
             const params = new URLSearchParams(filters);
-            const res = await axios.get(`http://localhost:5000/audit/logs?${params.toString()}`);
+            const res = await axios.get(`http://localhost:5000/audit/logs?${params.toString()}`, getAuthHeaders());
             setLogs(res.data);
         } catch (err) {
             console.error(err);
@@ -36,7 +40,7 @@ const AuditCenter = ({ currentUser }) => {
         setReportLoading(true);
         try {
             // Default 30 days
-            const res = await axios.get('http://localhost:5000/audit/reports/restricted?days=30');
+            const res = await axios.get('http://localhost:5000/audit/reports/restricted?days=30', getAuthHeaders());
             setReportData(res.data);
         } catch (err) {
             console.error(err);

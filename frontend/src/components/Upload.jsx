@@ -106,29 +106,46 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
         }
     };
 
+    const [message, setMessage] = useState(null);
+
+    // ... existing setup ...
+
     const handleUpload = async () => {
         setIsUploading(true);
+        setMessage(null);
+        let successCount = 0;
+        let errorCount = 0;
+
         for (let i = 0; i < files.length; i++) {
             const fileObj = files[i];
-            if (fileObj.status === 'success') continue;
+            if (fileObj.status === 'success') {
+                successCount++;
+                continue;
+            }
             setFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'uploading' } : f));
             const result = await uploadFile(fileObj);
-            if (result.status === 'success' && result.result.suggestions) {
-                setGeneralSuggestions(result.result.suggestions);
 
-                // Auto-set Doc Type if suggested
-                if (result.result.suggestions.category) {
-                    setDocType(result.result.suggestions.category);
+            if (result.status === 'success') {
+                successCount++;
+                if (result.result.suggestions) {
+                    setGeneralSuggestions(result.result.suggestions);
+                    if (result.result.suggestions.category) setDocType(result.result.suggestions.category);
+                    if (result.result.suggestions.department) setSelectedDepartment(result.result.suggestions.department);
                 }
-
-                // Auto-set Department if suggested
-                if (result.result.suggestions.department) {
-                    setSelectedDepartment(result.result.suggestions.department);
-                }
+            } else {
+                errorCount++;
             }
+
             setFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: result.status, result: result.result, error: result.error } : f));
-            if (result.status === 'success' && onUploadSuccess) onUploadSuccess();
         }
+
+        if (successCount > 0 && errorCount === 0) {
+            setMessage({ type: 'success', text: `Successfully uploaded ${successCount} files.` });
+            if (onUploadSuccess) onUploadSuccess();
+        } else if (errorCount > 0) {
+            setMessage({ type: 'error', text: `Finished with ${errorCount} errors. Please review.` });
+        }
+
         setIsUploading(false);
     };
 
@@ -137,6 +154,20 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
 
     return (
         <div className="glass-panel" style={{ padding: '2rem', marginBottom: '2rem' }}>
+            {message && (
+                <div style={{
+                    marginBottom: '1.5rem',
+                    padding: '1rem',
+                    borderRadius: '8px',
+                    display: 'flex', alignItems: 'center', gap: '0.5rem',
+                    background: message.type === 'success' ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                    color: message.type === 'success' ? '#4ade80' : '#f87171',
+                    border: `1px solid ${message.type === 'success' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)'}`
+                }}>
+                    {message.type === 'success' ? <Check size={18} /> : <AlertCircle size={18} />}
+                    {message.text}
+                </div>
+            )}
             <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <UploadIcon size={24} /> Upload Documents
             </h2>

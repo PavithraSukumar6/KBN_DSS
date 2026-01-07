@@ -81,11 +81,33 @@ const QCQueue = () => {
         }
     };
 
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if (!selectedBatch) return;
+            // Ignore if typing in a text field
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            if (e.key.toLowerCase() === 'a') {
+                e.preventDefault();
+                submitReview('Archived');
+            } else if (e.key.toLowerCase() === 'r') {
+                e.preventDefault();
+                submitReview('Returned');
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [selectedBatch, reviewNotes]); // Dependencies for closure
+
     return (
         <div className="glass-panel" style={{ padding: '2rem' }}>
             <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <Microscope size={24} /> Quality Control Queue
             </h2>
+            <div style={{ marginBottom: '1rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                <p>Hotkeys: <kbd>A</kbd> to Approve, <kbd>R</kbd> to Reject (when reviewing a batch)</p>
+            </div>
 
             {loading && !selectedBatch ? (
                 <p>Loading queue...</p>

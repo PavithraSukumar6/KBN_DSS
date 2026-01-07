@@ -44,6 +44,35 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 # Initialize Database
 init_db()
 
+# --- AUTH MIDDLEWARE ---
+from functools import wraps
+
+def require_auth(roles=None):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # Token Format: "USER_ID:ROLE" (Mock)
+            token = request.headers.get('X-Auth-Token')
+            if not token:
+                return jsonify({"error": "Missing Auth Token"}), 401
+            
+            try:
+                user_id, user_role = token.split(':')
+            except ValueError:
+                 return jsonify({"error": "Invalid Token Format"}), 401
+
+            if roles and user_role not in roles:
+                 # Special case: allow if role is Admin regardless? 
+                 # Let's say Admin overrides.
+                 if user_role != 'Admin':
+                    return jsonify({"error": "Insufficient Permissions"}), 403
+            
+            # Inject user info into request (optional, or just rely on args)
+            # request.user = {'id': user_id, 'role': user_role}
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     # Log the traceback
@@ -837,6 +866,7 @@ def reclassify_document_route(doc_id):
 
 # --- AUDIT & REPORTING ENDPOINTS ---
 @app.route('/audit/logs', methods=['GET'])
+@require_auth(roles=['Admin'])
 def get_audit_logs_route():
     from database.db import get_audit_logs
     filters = {
@@ -860,6 +890,7 @@ def get_restricted_report_route():
     return jsonify(report)
 
 @app.route('/access-policies', methods=['GET', 'POST'])
+@require_auth(roles=['Admin'])
 def manage_access_policies():
     from database.db import get_db_connection, log_audit
     
@@ -908,6 +939,7 @@ def check_legal_hold():
     return row and row['value'] == 'true'
 
 @app.route('/retention-policies', methods=['GET', 'POST'])
+@require_auth(roles=['Admin'])
 def manage_retention_policies():
     conn = get_db_connection()
     if request.method == 'POST':
@@ -940,6 +972,7 @@ def manage_retention_policies():
     return jsonify(policies)
 
 @app.route('/settings/legal-hold', methods=['POST'])
+@require_auth(roles=['Admin'])
 def toggle_legal_hold():
     is_admin = request.args.get('is_admin', 'false').lower() == 'true'
     if not is_admin:
@@ -1272,6 +1305,30 @@ def direct_scan():
     except Exception as e:
         return jsonify({"error": f"Direct Scan failed: {str(e)}"}), 500
 
+@app.route('/taxonomy/versioned-update', methods=['POST'])
+@require_auth(roles=['Admin'])
+def update_taxonomy_versioned_route():
+    from utils.taxonomy_versioning import update_taxonomy_item_versioned
+    data = request.json
+    item_id = data.get('id')
+    new_value = data.get('value')
+    
+    if not item_id or not new_value:
+        return jsonify({"error": "Missing id or value"}), 400
+        
+    result = update_taxonomy_item_versioned(item_id, new_value)
+    if 'error' in result:
+        return jsonify(result), 500
+    return jsonify(result), 200
+
 if __name__ == '__main__':
+    try:
+        from utils.backup_service import perform_backup
+        print("--- Starting Automated Backup (RPO) ---")
+        perform_backup()
+        print("--- Backup Completed ---")
+    except Exception as e:
+        print(f"Startup Backup Failed: {e}")
+
     app.run(host='0.0.0.0', port=5000, debug=True)
 

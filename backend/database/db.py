@@ -154,6 +154,11 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # Performance Indices (Search Optimization)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_category ON documents(category)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_upload_date ON documents(upload_date)")
+
         # Create Taxonomy Table
         conn.execute('''
             CREATE TABLE IF NOT EXISTS taxonomy (
@@ -165,6 +170,13 @@ def init_db():
                 UNIQUE(category, value)
             );
         ''')
+        
+        # Versioning Migration
+        try:
+             conn.execute("ALTER TABLE taxonomy ADD COLUMN version_number INTEGER DEFAULT 1")
+             conn.execute("ALTER TABLE taxonomy ADD COLUMN parent_version_id INTEGER") # Link to previous ID if needed
+        except sqlite3.OperationalError:
+             pass
 
         # Access Policies Table (Role-Based Access to Confidentiality Levels)
         conn.execute('''
@@ -365,6 +377,21 @@ def init_db():
                 conn.execute(f'ALTER TABLE audit_log ADD COLUMN {col} TEXT')
             except sqlite3.OperationalError:
                 pass
+
+        # Audit Lock Triggers (Immutable Logs)
+        conn.executescript('''
+            CREATE TRIGGER IF NOT EXISTS limit_audit_delete
+            BEFORE DELETE ON audit_log
+            BEGIN
+                SELECT RAISE(ABORT, 'Security Alert: Audit Logs are Immutable!');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS limit_audit_update
+            BEFORE UPDATE ON audit_log
+            BEGIN
+                SELECT RAISE(ABORT, 'Security Alert: Audit Logs are Immutable!');
+            END;
+        ''')
 
     conn.close()
 

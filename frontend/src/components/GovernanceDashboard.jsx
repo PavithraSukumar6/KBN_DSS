@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-import { Shield, Plus, Power, Check, AlertCircle, Clock, Gavel, Trash2, AlertTriangle } from 'lucide-react';
+import { Gavel, Clock, Shield, Plus, Power, Check, AlertCircle, AlertTriangle, Edit, FileText, HelpCircle } from 'lucide-react';
 
 const GovernanceDashboard = () => {
     const [taxonomy, setTaxonomy] = useState([]);
@@ -14,6 +14,10 @@ const GovernanceDashboard = () => {
     const [docTypes, setDocTypes] = useState([]);
     const [accessPolicies, setAccessPolicies] = useState([]);
 
+    const getAuthHeaders = () => ({
+        headers: { 'X-Auth-Token': 'Gokul_Admin:Admin' }
+    });
+
     useEffect(() => {
         fetchData();
         fetchSettings();
@@ -22,7 +26,7 @@ const GovernanceDashboard = () => {
 
     const fetchAccessPolicies = async () => {
         try {
-            const res = await axios.get('http://localhost:5000/access-policies');
+            const res = await axios.get('http://localhost:5000/access-policies', getAuthHeaders());
             setAccessPolicies(res.data);
         } catch (err) { console.error(err); }
     };
@@ -32,7 +36,7 @@ const GovernanceDashboard = () => {
             await axios.post('http://localhost:5000/access-policies?is_admin=true', {
                 role: policy.role,
                 allowed_levels: policy.editValue
-            });
+            }, getAuthHeaders());
             fetchAccessPolicies(); // Refresh
             setMessage({ type: 'success', text: `Updated policy for ${policy.role}` });
         } catch (err) {
@@ -49,7 +53,7 @@ const GovernanceDashboard = () => {
         try {
             const [taxRes, polRes] = await Promise.all([
                 axios.get('http://localhost:5000/taxonomy'),
-                axios.get('http://localhost:5000/retention-policies')
+                axios.get('http://localhost:5000/retention-policies', getAuthHeaders())
             ]);
             setTaxonomy(taxRes.data);
             setPolicies(polRes.data);
@@ -63,7 +67,7 @@ const GovernanceDashboard = () => {
 
     const fetchSettings = async () => {
         try {
-            const res = await axios.get('http://localhost:5000/settings');
+            const res = await axios.get('http://localhost:5000/settings', getAuthHeaders());
             setLegalHold(res.data.legal_hold === 'true');
         } catch (err) {
             console.error(err);
@@ -77,7 +81,7 @@ const GovernanceDashboard = () => {
             await axios.post('http://localhost:5000/taxonomy?is_admin=true', {
                 category,
                 value: newValue
-            });
+            }, getAuthHeaders());
             setMessage({ type: 'success', text: `Added ${newValue} to ${category}` });
             setNewValue('');
             fetchData();
@@ -91,10 +95,26 @@ const GovernanceDashboard = () => {
         try {
             await axios.patch(`http://localhost:5000/taxonomy/${item.id}?is_admin=true`, {
                 status: nextStatus
-            });
+            }, getAuthHeaders());
             fetchData();
         } catch (err) {
             alert("Failed to update status");
+        }
+    };
+
+    const handleVersionUpdate = async (item) => {
+        const newVal = prompt(`Update Value for ${item.value} (This will create a new version of the item):`, item.value);
+        if (!newVal || newVal === item.value) return;
+
+        try {
+            await axios.post('http://localhost:5000/taxonomy/versioned-update', {
+                id: item.id,
+                value: newVal
+            }, getAuthHeaders());
+            setMessage({ type: 'success', text: `Updated ${item.value} -> ${newVal} (New Version)` });
+            fetchData();
+        } catch (err) {
+            setMessage({ type: 'error', text: err.response?.data?.error || 'Version Update Failed' });
         }
     };
 
@@ -103,7 +123,7 @@ const GovernanceDashboard = () => {
             await axios.post('http://localhost:5000/retention-policies?is_admin=true', {
                 document_type: docType,
                 retention_years: parseInt(years)
-            });
+            }, getAuthHeaders());
             fetchData();
             // Optimistic update
             setPolicies(prev => {
@@ -121,7 +141,7 @@ const GovernanceDashboard = () => {
     const toggleLegalHold = async () => {
         const newState = !legalHold;
         try {
-            await axios.post('http://localhost:5000/settings/legal-hold?is_admin=true', { active: newState });
+            await axios.post('http://localhost:5000/settings/legal-hold?is_admin=true', { active: newState }, getAuthHeaders());
             setLegalHold(newState);
             setMessage({ type: newState ? 'error' : 'success', text: `Legal Hold is now ${newState ? 'ACTIVE' : 'INACTIVE'}` });
         } catch (err) {
@@ -216,16 +236,30 @@ const GovernanceDashboard = () => {
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                             {docTypes.map(item => (
                                 <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
-                                    <span style={{ textDecoration: item.status === 'Deprecated' ? 'line-through' : 'none', color: item.status === 'Deprecated' ? 'var(--text-muted)' : 'white' }}>
-                                        {item.value}
-                                    </span>
-                                    <button
-                                        onClick={() => toggleStatus(item)}
-                                        className="btn btn-ghost"
-                                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: item.status === 'Active' ? '#f87171' : '#4ade80' }}
-                                    >
-                                        <Power size={14} style={{ marginRight: '0.25rem' }} /> {item.status === 'Active' ? 'Deprecate' : 'Activate'}
-                                    </button>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <span style={{ textDecoration: item.status === 'Deprecated' ? 'line-through' : 'none', color: item.status === 'Deprecated' ? 'var(--text-muted)' : 'white' }}>
+                                            {item.value}
+                                        </span>
+                                        {item.version_number > 1 && <span style={{ fontSize: '0.7rem', background: '#3b82f6', borderRadius: '4px', padding: '0.1rem 0.3rem' }}>v{item.version_number}</span>}
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                        <button
+                                            onClick={() => handleVersionUpdate(item)}
+                                            className="btn btn-ghost"
+                                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}
+                                            disabled={item.status === 'Deprecated'}
+                                            title="Rename / Create New Version"
+                                        >
+                                            <Edit size={14} />
+                                        </button>
+                                        <button
+                                            onClick={() => toggleStatus(item)}
+                                            className="btn btn-ghost"
+                                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: item.status === 'Active' ? '#f87171' : '#4ade80' }}
+                                        >
+                                            <Power size={14} style={{ marginRight: '0.25rem' }} /> {item.status === 'Active' ? 'Deprecate' : 'Activate'}
+                                        </button>
+                                    </div>
                                 </div>
                             ))}
                         </div>
@@ -237,16 +271,30 @@ const GovernanceDashboard = () => {
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                             {departments.map(item => (
                                 <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
-                                    <span style={{ textDecoration: item.status === 'Deprecated' ? 'line-through' : 'none', color: item.status === 'Deprecated' ? 'var(--text-muted)' : 'white' }}>
-                                        {item.value}
-                                    </span>
-                                    <button
-                                        onClick={() => toggleStatus(item)}
-                                        className="btn btn-ghost"
-                                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: item.status === 'Active' ? '#f87171' : '#4ade80' }}
-                                    >
-                                        <Power size={14} style={{ marginRight: '0.25rem' }} /> {item.status === 'Active' ? 'Deprecate' : 'Activate'}
-                                    </button>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <span style={{ textDecoration: item.status === 'Deprecated' ? 'line-through' : 'none', color: item.status === 'Deprecated' ? 'var(--text-muted)' : 'white' }}>
+                                            {item.value}
+                                        </span>
+                                        {item.version_number > 1 && <span style={{ fontSize: '0.7rem', background: '#3b82f6', borderRadius: '4px', padding: '0.1rem 0.3rem' }}>v{item.version_number}</span>}
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                        <button
+                                            onClick={() => handleVersionUpdate(item)}
+                                            className="btn btn-ghost"
+                                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}
+                                            disabled={item.status === 'Deprecated'}
+                                            title="Rename / Create New Version"
+                                        >
+                                            <Edit size={14} />
+                                        </button>
+                                        <button
+                                            onClick={() => toggleStatus(item)}
+                                            className="btn btn-ghost"
+                                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: item.status === 'Active' ? '#f87171' : '#4ade80' }}
+                                        >
+                                            <Power size={14} style={{ marginRight: '0.25rem' }} /> {item.status === 'Active' ? 'Deprecate' : 'Activate'}
+                                        </button>
+                                    </div>
                                 </div>
                             ))}
                         </div>
