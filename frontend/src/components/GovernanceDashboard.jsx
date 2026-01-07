@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+
 import { Shield, Plus, Power, Check, AlertCircle, Clock, Gavel, Trash2, AlertTriangle } from 'lucide-react';
 
 const GovernanceDashboard = () => {
@@ -13,6 +12,33 @@ const GovernanceDashboard = () => {
     const [policies, setPolicies] = useState([]);
     const [legalHold, setLegalHold] = useState(false);
     const [docTypes, setDocTypes] = useState([]);
+    const [accessPolicies, setAccessPolicies] = useState([]);
+
+    useEffect(() => {
+        fetchData();
+        fetchSettings();
+        fetchAccessPolicies();
+    }, []);
+
+    const fetchAccessPolicies = async () => {
+        try {
+            const res = await axios.get('http://localhost:5000/access-policies');
+            setAccessPolicies(res.data);
+        } catch (err) { console.error(err); }
+    };
+
+    const updateAccessPolicy = async (policy) => {
+        try {
+            await axios.post('http://localhost:5000/access-policies?is_admin=true', {
+                role: policy.role,
+                allowed_levels: policy.editValue
+            });
+            fetchAccessPolicies(); // Refresh
+            setMessage({ type: 'success', text: `Updated policy for ${policy.role}` });
+        } catch (err) {
+            alert("Failed to update access policy");
+        }
+    };
 
     useEffect(() => {
         fetchData();
@@ -257,6 +283,64 @@ const GovernanceDashboard = () => {
                             </div>
                         )
                     })}
+                </div>
+            </div>
+
+            <div className="glass-panel" style={{ padding: '2rem' }}>
+                <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <Shield size={24} color="#4ade80" /> Access Control Policies (Need-to-Know)
+                </h2>
+                <p style={{ color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
+                    Define which classification levels (Public, Internal, Confidential) each role can access.
+                </p>
+                <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: '8px', overflow: 'hidden' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead>
+                            <tr style={{ background: 'rgba(255,255,255,0.05)', textAlign: 'left' }}>
+                                <th style={{ padding: '1rem' }}>Role</th>
+                                <th style={{ padding: '1rem' }}>Allowed Classification Levels</th>
+                                <th style={{ padding: '1rem' }}>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {accessPolicies.map(pol => (
+                                <tr key={pol.id} style={{ borderBottom: '1px solid var(--glass-border)' }}>
+                                    <td style={{ padding: '1rem', fontWeight: 'bold' }}>{pol.role}</td>
+                                    <td style={{ padding: '1rem' }}>
+                                        {pol.isEditing ? (
+                                            <input
+                                                className="input"
+                                                value={pol.editValue}
+                                                onChange={e => setAccessPolicies(prev => prev.map(p => p.id === pol.id ? { ...p, editValue: e.target.value } : p))}
+                                                placeholder="e.g. Public,Internal"
+                                            />
+                                        ) : (
+                                            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                                {pol.allowed_levels.split(',').map(l => (
+                                                    <span key={l} style={{
+                                                        fontSize: '0.8rem',
+                                                        padding: '0.2rem 0.5rem',
+                                                        borderRadius: '4px',
+                                                        background: l.trim() === 'Confidential' ? '#ef4444' : l.trim() === 'Internal' ? '#60a5fa' : '#22c55e',
+                                                        color: 'white'
+                                                    }}>
+                                                        {l.trim()}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </td>
+                                    <td style={{ padding: '1rem' }}>
+                                        {pol.isEditing ? (
+                                            <button className="btn" style={{ fontSize: '0.8rem' }} onClick={() => updateAccessPolicy(pol)}>Save</button>
+                                        ) : (
+                                            <button className="btn btn-ghost" style={{ fontSize: '0.8rem' }} onClick={() => setAccessPolicies(prev => prev.map(p => p.id === pol.id ? { ...p, isEditing: true, editValue: p.allowed_levels } : p))}>Edit</button>
+                                        )}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
                 </div>
             </div>
 

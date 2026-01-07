@@ -6,10 +6,11 @@ import ContainerManager from './components/ContainerManager';
 import QCQueue from './components/QCQueue';
 import AnalyticsView from './components/AnalyticsView';
 import GovernanceDashboard from './components/GovernanceDashboard';
-import GovernanceDashboard from './components/GovernanceDashboard';
+
 import AuditCenter from './components/AuditCenter';
 import CleanupReviews from './components/CleanupReviews';
-import { LayoutDashboard, Box, ScanLine, Microscope, BarChart3, Shield, User, UserCheck, Activity, Trash2 } from 'lucide-react';
+import WorkloadManager from './components/WorkloadManager';
+import { LayoutDashboard, Box, ScanLine, Microscope, BarChart3, Shield, User, UserCheck, Activity, Trash2, Briefcase } from 'lucide-react';
 
 function App() {
     const [refreshKey, setRefreshKey] = useState(0);
@@ -66,26 +67,7 @@ function App() {
                 position: 'relative'
             }}>
                 <div style={{ position: 'absolute', top: '20px', right: '20px', display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                    <div className="dropdown" style={{ position: 'relative' }}>
-                        <select
-                            value={currentUser?.id || ''}
-                            onChange={(e) => handleUserSwitch(e.target.value)}
-                            style={{
-                                padding: '0.5rem',
-                                background: 'rgba(255,255,255,0.1)',
-                                border: '1px solid var(--glass-border)',
-                                borderRadius: '8px',
-                                color: 'white',
-                                cursor: 'pointer'
-                            }}
-                        >
-                            {users.map(u => (
-                                <option key={u.id} value={u.id} style={{ color: 'black' }}>
-                                    {u.name} ({u.role} - {u.assigned_scope_value})
-                                </option>
-                            ))}
-                        </select>
-                    </div>
+
                     {/* Access Request Dashboard Link (Admin Only) */}
                     {isAdmin && (
                         <button
@@ -139,6 +121,15 @@ function App() {
                 >
                     <Microscope size={20} /> QC Queue
                 </button>
+                {isAdmin && (
+                    <button
+                        onClick={() => setActiveTab('workload')}
+                        className={`btn ${activeTab === 'workload' ? '' : 'btn-ghost'} `}
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: activeTab === 'workload' ? '#3b82f6' : 'transparent' }}
+                    >
+                        <Briefcase size={20} /> Workload
+                    </button>
+                )}
                 <button
                     onClick={() => setActiveTab('analytics')}
                     className={`btn ${activeTab === 'analytics' ? '' : 'btn-ghost'} `}
@@ -179,6 +170,8 @@ function App() {
                     </div>
                 ) : activeTab === 'qc' ? (
                     <QCQueue />
+                ) : activeTab === 'workload' ? (
+                    <WorkloadManager />
                 ) : activeTab === 'analytics' ? (
                     <AnalyticsView />
                 ) : activeTab === 'governance' ? (

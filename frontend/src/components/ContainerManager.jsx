@@ -28,6 +28,55 @@ const ContainerManager = ({ refreshTrigger }) => {
 
     const selectedContainer = containers.find(c => c.id === selectedId);
 
+    const [error, setError] = useState(null);
+    const [transferMode, setTransferMode] = useState(false);
+    const [historyMode, setHistoryMode] = useState(false);
+    const [newLocation, setNewLocation] = useState('');
+    const [historyLogs, setHistoryLogs] = useState([]);
+
+    const handleTransferClick = () => {
+        setTransferMode(!transferMode);
+        setHistoryMode(false);
+        setNewLocation(selectedContainer?.source_location || '');
+        setError(null);
+    };
+
+    const handleHistoryClick = async () => {
+        if (historyMode) {
+            setHistoryMode(false);
+            return;
+        }
+        setTransferMode(false);
+        setLoading(true);
+        try {
+            const res = await axios.get(`http://localhost:5000/containers/${selectedContainer.id}/history`);
+            setHistoryLogs(res.data);
+            setHistoryMode(true);
+        } catch (err) {
+            console.error(err);
+            setError("Failed to fetch history");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const confirmTransfer = async () => {
+        if (!newLocation.trim()) return;
+        setLoading(true);
+        try {
+            await axios.post(`http://localhost:5000/containers/${selectedContainer.id}/transfer`, {
+                location: newLocation,
+                user: 'Gokul_Admin'
+            });
+            setTransferMode(false);
+            fetchContainers();
+        } catch (err) {
+            setError("Transfer failed");
+        } finally {
+            setLoading(false);
+        }
+    };
+
     return (
         <div className="glass-panel" style={{ padding: '2rem', minHeight: '500px' }}>
             <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -37,14 +86,14 @@ const ContainerManager = ({ refreshTrigger }) => {
             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(200px, 1fr) 1.5fr', gap: '2rem' }}>
                 {/* Tree View Section */}
                 <div style={{ borderRight: '1px solid var(--glass-border)', paddingRight: '1rem' }}>
-                    {loading && containers.length === 0 ? (
+                    {loading && !selectedContainer ? (
                         <p style={{ color: 'var(--text-muted)' }}>Loading hierarchy...</p>
                     ) : containers.length === 0 ? (
                         <p style={{ color: 'var(--text-muted)' }}>No containers yet.</p>
                     ) : (
                         <FolderTree
                             containers={containers}
-                            onSelect={setSelectedId}
+                            onSelect={(id) => { setSelectedId(id); setTransferMode(false); setHistoryMode(false); setError(null); }}
                             selectedId={selectedId}
                         />
                     )}
@@ -80,8 +129,8 @@ const ContainerManager = ({ refreshTrigger }) => {
                                     <div>{selectedContainer.department || 'N/A'}</div>
                                 </div>
                                 <div>
-                                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block' }}>Physical Pages</label>
-                                    <div>{selectedContainer.physical_page_count || 0}</div>
+                                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block' }}>Location</label>
+                                    <div>{selectedContainer.source_location || 'Unknown'}</div>
                                 </div>
                                 <div>
                                     <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block' }}>Confidentiality</label>
@@ -89,14 +138,63 @@ const ContainerManager = ({ refreshTrigger }) => {
                                 </div>
                             </div>
 
-                            <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                <button className="btn" style={{ flex: 1, padding: '0.6rem' }}>
+                            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+                                <button
+                                    className={`btn ${transferMode ? 'active' : ''}`}
+                                    style={{ flex: 1, padding: '0.6rem', background: transferMode ? 'var(--primary)' : '' }}
+                                    onClick={handleTransferClick}
+                                >
                                     <Truck size={16} /> Transfer
                                 </button>
-                                <button className="btn" style={{ flex: 1, padding: '0.6rem' }}>
+                                <button
+                                    className={`btn ${historyMode ? 'active' : ''}`}
+                                    style={{ flex: 1, padding: '0.6rem', background: historyMode ? 'var(--primary)' : '' }}
+                                    onClick={handleHistoryClick}
+                                >
                                     <History size={16} /> History
                                 </button>
                             </div>
+
+                            {error && (
+                                <div style={{ background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', padding: '0.5rem', borderRadius: '6px', marginBottom: '1rem', fontSize: '0.9rem' }}>
+                                    {error}
+                                </div>
+                            )}
+
+                            {transferMode && (
+                                <div style={{ background: 'rgba(0,0,0,0.2)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--glass-border)' }}>
+                                    <label style={{ display: 'block', fontSize: '0.9rem', marginBottom: '0.5rem' }}>New Location / Shelf:</label>
+                                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                        <input
+                                            type="text"
+                                            value={newLocation}
+                                            onChange={(e) => setNewLocation(e.target.value)}
+                                            style={{ flex: 1, padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--glass-border)', background: 'rgba(255,255,255,0.05)', color: 'white' }}
+                                        />
+                                        <button className="btn" onClick={confirmTransfer} disabled={loading}>Confirm</button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {historyMode && (
+                                <div style={{ background: 'rgba(0,0,0,0.2)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--glass-border)', maxHeight: '200px', overflowY: 'auto' }}>
+                                    <h4 style={{ marginTop: 0, marginBottom: '0.5rem' }}>History Log</h4>
+                                    {historyLogs.length === 0 ? (
+                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>No history found.</p>
+                                    ) : (
+                                        <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: '0.85rem' }}>
+                                            {historyLogs.map((log, i) => (
+                                                <li key={i} style={{ padding: '0.4rem 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                                                    <div style={{ color: '#60a5fa' }}>{log.timestamp}</div>
+                                                    <div>Moved to <b>{log.new_location}</b> by {log.transferred_by}</div>
+                                                    <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>Prev: {log.previous_location}</div>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                </div>
+                            )}
+
                         </div>
                     ) : (
                         <div style={{ textAlign: 'center', color: 'var(--text-muted)', paddingTop: '4rem' }}>

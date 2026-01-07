@@ -31,6 +31,12 @@ def extract_text(image_path):
             return "", 0.0
             
         return text, round(avg_confidence, 2)
+    except pytesseract.TesseractNotFoundError:
+        print("Tesseract not found. Skipping OCR.")
+        return "OCR_SKIPPED", 0.0
     except Exception as e:
+        if "tesseract is not installed" in str(e).lower() or "not in your path" in str(e).lower():
+            print("Tesseract not found (generic error). Skipping OCR.")
+            return "OCR_SKIPPED", 0.0
         print(f"Error during OCR: {e}")
         return f"[Error: OCR Failed - {str(e)}]", 0.0

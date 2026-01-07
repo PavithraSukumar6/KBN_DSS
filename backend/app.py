@@ -31,7 +31,7 @@ except ImportError:
 
 
 app = Flask(__name__)
-# Enable CORS for all routes and origins
+# Force reload trigger - Fix Analytics
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
@@ -54,18 +54,48 @@ def handle_exception(e):
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
+    import hashlib
+    from database.db import check_duplicate_hash, log_audit, save_document, get_db_connection
+    from utils.classification import suggest_metadata_from_all
+
     if 'file' not in request.files:
         return jsonify({"error": "No file part"}), 400
     
     file = request.files['file']
+    
+    # Calculate Hash
+    file_content = file.read()
+    file_hash = hashlib.sha256(file_content).hexdigest()
+    file.seek(0) # Reset cursor
+    
+    # Check Duplicate
+    existing_doc = check_duplicate_hash(file_hash)
+    if existing_doc:
+        return jsonify({
+            "error": "Duplicate document found.",
+            "existing_doc": {
+                "id": existing_doc['id'],
+                "filename": existing_doc['filename'],
+                "upload_date": existing_doc['upload_date'],
+                "uploader": existing_doc['uploader_id']
+            }
+        }), 409
+
     container_id = request.form.get('container_id') # Get container ID
-    batch_id = request.form.get('batch_id') # Get Batch ID if part of a batch
     batch_id = request.form.get('batch_id') # Get Batch ID if part of a batch
     tags = request.form.get('tags') # New: Tags
     uploader_id = request.form.get('uploader_id', 'Gokul_Admin')
     # Default confidentiality for now
     confidentiality = request.form.get('confidentiality_level', 'Internal')
 
+    # Get manual metadata overrides
+    category = request.form.get('category')
+    department = request.form.get('department')
+    
+    metadata = {}
+    if department:
+        metadata['department'] = department
+        
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
     
@@ -89,25 +119,24 @@ def upload_file():
             for split_path in split_files:
                 filename = os.path.basename(split_path)
                 
-                # Create detailed record with 'Processing' status
-                # We use 'save_document' but we need to pass the new params.
-                # Since save_document signature was updated in db.py, we can use it.
-                # Note: save_document signature might not have confidentiality_level yet, need to update db.py save_document too?
-                # Actually, we migrated the column. let's check saving.
-                # db.py's save_document doesn't take confidentiality yet. 
-                # I should update save_document in db.py to accept it, OR update after save.
-                # For now, let's stick to update after.
+                # Check for filename-based hints if category matches 'Auto-Detect' (None)
+                initial_cat = category or "Unclassified"
+                
+                # We use JSON dump for metadata column
+                meta_json = json.dumps(metadata) if metadata else None
                 
                 doc_id = save_document(
                     filename=filename,
-                    category="Unclassified", # Placeholder
-                    confidence=0.0,
+                    category=initial_cat, 
+                    confidence=1.0 if category else 0.0, # High confidence if manually set
                     content="OCR Pending...",
                     container_id=container_id,
                     batch_id=batch_id,
                     ocr_status="Processing",
                     uploader_id=uploader_id,
-                    tags=tags
+                    tags=tags,
+                    metadata=meta_json,
+                    content_hash=file_hash
                 )
                 
                 # Manually set confidentiality if not default
@@ -165,14 +194,45 @@ def get_access_requests_route():
 
 @app.route('/access/approve', methods=['POST'])
 def approve_access_route():
-    from database.db import process_access_request
+    from database.db import process_access_request, get_db_connection, get_document
     data = request.json
-    process_access_request(data['request_id'], data['status'], data['reviewer'], data.get('expiry_date'))
+    request_id = data['request_id']
+    reviewer = data['reviewer']
+    status = data['status']
+    
+    # Governance Check: Only Data Owner or Admin can approve
+    conn = get_db_connection()
+    req = conn.execute("SELECT document_id FROM access_requests WHERE id = ?", (request_id,)).fetchone()
+    conn.close()
+    
+    if not req:
+         return jsonify({"error": "Request not found"}), 404
+         
+    doc = get_document(req['document_id'])
+    
+    # Check if reviewer is Owner or Admin
+    # (assuming is_admin check is handled by frontend passing a flag or we check user role from DB)
+    # For robust security, we should check the user role from DB for 'reviewer'
+    conn = get_db_connection()
+    user_row = conn.execute("SELECT role FROM users WHERE id = ?", (reviewer,)).fetchone()
+    conn.close()
+    
+    is_admin = user_row and user_row['role'] == 'Admin'
+    owner_id = doc.get('owner_id')
+    
+    # Fallback: if no owner, allow Admin or Uploader (legacy)
+    if not owner_id:
+        owner_id = doc.get('uploader_id')
+    
+    if not is_admin and reviewer != owner_id:
+        return jsonify({"error": "Permission Denied: Only the Data Owner can approve access."}), 403
+
+    process_access_request(request_id, status, reviewer, data.get('expiry_date'))
     
     from database.db import log_audit
-    log_audit('access_request', data['request_id'], 'ACCESS_REVIEW', f"Request {data['status']} by {data['reviewer']}", data['reviewer'], ip_address=request.remote_addr, scope='Security')
+    log_audit('access_request', request_id, 'ACCESS_REVIEW', f"Request {status} by {reviewer}", reviewer, ip_address=request.remote_addr, scope='Security')
     
-    return jsonify({"message": f"Request {data['status']}"}), 200
+    return jsonify({"message": f"Request {status}"}), 200
 
 @app.route('/view/<int:doc_id>', methods=['GET'])
 def view_document_route(doc_id):
@@ -225,21 +285,76 @@ def process_document_background(doc_id, filepath):
     Background worker to run OCR and Classification, then update DB.
     """
     try:
+        # Fetch existing doc to check for overrides (manual category/metadata)
+        from database.db import get_document
+        existing_doc = get_document(doc_id)
+        manual_category = None
+        manual_metadata = {}
+        if existing_doc:
+            if existing_doc['category'] and existing_doc['category'] != 'Unclassified':
+                manual_category = existing_doc['category']
+            if existing_doc['metadata']:
+                try:
+                    manual_metadata = json.loads(existing_doc['metadata'])
+                except:
+                    pass
+
         # 1. OCR
         text, confidence = extract_text(filepath)
         
-        # Validation
-        if not text or len(text.strip()) < 10:
-             # Update as Failed
-            update_document_status(doc_id, "Failed", "No text detected", 0.0, "Unclassified")
-            return
+        # Validation & Fallback
+        if not text or len(text.strip()) < 10 or text == "OCR_SKIPPED":
+             # Fallback: Try to classify by filename
+            from utils.classification import suggest_metadata_from_all
+            suggestions = suggest_metadata_from_all(os.path.basename(filepath))
+            
+            fallback_category = suggestions.get('category')
+            
+            if fallback_category:
+                # Success via Fallback
+                category = manual_category if manual_category else fallback_category
+                
+                # We save with a specific status indicating no OCR was done
+                ocr_status_label = "Completed (No OCR)"
+                
+                # Still try to extract metadata if any (from filename? logic is mostly text based but let's see)
+                # suggest_metadata_from_all also returns other suggestions
+                
+                # Construct metadata from suggestions
+                meta_json = json.dumps(suggestions)
+                
+                update_document_status(doc_id, ocr_status_label, "Content parsing skipped (OCR missing).", 0.5, category, meta_json, category + " Template")
+                log_audit('document', doc_id, 'classification_fallback', f"Classified as {category} using filename fallback", "System")
+                return
+            else:
+                # Failed and no fallback found
+                target_cat = manual_category if manual_category else "Unclassified"
+                update_document_status(doc_id, "Failed", "No text detected and filename insufficient.", 0.0, target_cat)
+                return
 
         # 2. Classification
-        category, _ = classify_document(text)
+        classified_cat, _ = classify_document(text)
+        category = manual_category if manual_category else classified_cat
         
         # 3. Extraction
         from utils.extraction import extract_metadata
-        metadata_json = extract_metadata(text, category)
+        extracted_metadata = extract_metadata(text, category)
+        
+        # Merge Metadata (Manual overrides extracted)
+        # Ensure extracted_metadata is dict
+        if isinstance(extracted_metadata, str):
+            try:
+                extracted_metadata = json.loads(extracted_metadata)
+            except:
+                extracted_metadata = {}
+        
+        if not isinstance(extracted_metadata, dict):
+            extracted_metadata = {}
+            
+        # Merge: Start with extracted, update with manual
+        final_metadata = extracted_metadata.copy()
+        final_metadata.update(manual_metadata)
+        metadata_json = json.dumps(final_metadata)
         
         # 4. Suggestions (Refined)
         final_suggestions = suggest_metadata_from_all(os.path.basename(filepath), text)
@@ -294,13 +409,27 @@ def process_document_background(doc_id, filepath):
         if needs_approval:
             update_document_status(doc_id, "Completed", text, confidence, category, metadata_json, category + " Template")
             update_approval_status(doc_id, "Pending Approval", "System")
+        
+        # FR-32: Fast-Track QC Logic
         elif confidence > 90 and risk == "Low":
-            publish_document(doc_id)
-            log_audit('document', doc_id, 'auto-publish', f"Auto-published due to high confidence ({confidence}%) and low risk", "System")
+            # High confidence + Low Risk -> QC Passed automatically
+            # We still mark as 'Completed' but maybe we can introduce 'QC_Passed'
+            # Let's say 'QC_Passed' is a status or we just skip QC queue.
+            # If we don't set to 'QC_Passed', it might fall into QC Queue if it's default pending?
+            # Let's see: batches are pending by default. 
+            # If we want to skip legacy QC for these, update `ocr_status` to 'QC_Passed' or 'Published'?
+            # The prompt says "set status to 'QC_Passed'".
+            
+            update_document_status(doc_id, "QC_Passed", text, confidence, category, metadata_json, category + " Template")
+            log_audit('document', doc_id, 'auto-qc', f"Auto-passed QC (Conf: {confidence}%)", "System")
+            
+            # Auto-publish if really confident? Request says "QC_Passed". 
+            # If 'QC_Passed' means ready for export, that's good.
         else:
-            # Standard published if no approval needed and not auto-published? 
-            # Actually, standard flow might wait for QC. Let's keep it consistent.
-            pass
+            # Rigorous QC Required
+            # Mark as 'Rigorous_QC' or just standard 'Completed' (which means Pending QC in new flow?)
+            # Let's mark as 'Rigorous_QC' to be explicit in the UI badges.
+            update_document_status(doc_id, "Rigorous_QC", text, confidence, category, metadata_json, category + " Template")
         
     except Exception as e:
         print(f"Background Job Failed for Doc {doc_id}: {e}")
@@ -415,16 +544,137 @@ def check_batch_completeness(batch_id):
         "status": batch['status']
     })
 
-@app.route('/containers/<id>/transfer', methods=['POST'])
-def transfer_container(id):
-    data = request.json
-    log_transfer(id, data['previous_location'], data['new_location'], data['transferred_by'])
-    return jsonify({"message": "Transfer logged successfully"}), 200
+@app.route('/qc/queue', methods=['GET'])
+def get_qc_queue():
+    from database.db import get_qc_queue_batches
+    batches = get_qc_queue_batches()
+    return jsonify(batches)
 
-@app.route('/containers/<id>/logs', methods=['GET'])
-def container_history(id):
-    logs = get_container_logs(id)
-    return jsonify(logs)
+@app.route('/qc/batch/<int:batch_id>/review', methods=['POST'])
+def review_batch(batch_id):
+    data = request.json
+    status = data.get('status') # 'Archived' (Approved), 'Returned' (Rejected)
+    notes = data.get('notes')
+    user = data.get('user', 'QA_Specialist')
+
+    if not status:
+        return jsonify({"error": "Status is required"}), 400
+
+    from database.db import update_batch_qc, log_audit
+    
+    update_batch_qc(batch_id, status, notes, user)
+    
+    # If returned, maybe we should status update the docs?
+    # For now, we trust the batch status.
+    
+    log_audit('batch', batch_id, 'QC_REVIEW', f"Batch {status} by {user}", user, ip_address=request.remote_addr)
+    return jsonify({"message": f"Batch marked as {status}"}), 200
+
+@app.route('/documents/<int:doc_id>/publish', methods=['POST'])
+def publish_document_route(doc_id):
+    user = request.args.get('user', 'System')
+    from database.db import publish_document, log_audit
+    
+    publish_document(doc_id)
+    log_audit('document', doc_id, 'PUBLISH', "Document approved and published", user, ip_address=request.remote_addr)
+    
+    return jsonify({"message": "Document published"}), 200
+
+@app.route('/documents/<int:doc_id>/rescan', methods=['POST'])
+def rescan_document_route(doc_id):
+    data = request.json
+    reason = data.get('reason', 'Rescan Requested')
+    user = data.get('user', 'System')
+    
+    from database.db import update_document_status, log_audit, save_document_version
+    
+    # Save current version before resetting
+    save_document_version(doc_id, f"Rescan Requested: {reason}", user)
+    
+    # Reset status to 'Intake' or similar so it can be re-processed or just flagged
+    # Actually, if it's a "Rescan", we might want to clear the content/ocr?
+    # For now, let's just mark it 'Pending Rescan' or similar status?
+    # The frontend expects to probably re-upload or re-scan.
+    # Let's set ocr_status to 'Rescan_Required' or similar.
+    # But db.py update_document_status sets ocr_status, content, confidence, category...
+    
+    # We should probably just update the status field if we are strictly tracking lifecycle.
+    # But update_document_status is the main updater.
+    # Let's use a direct update for status since update_document_status requires all params.
+    conn = get_db_connection()
+    conn.execute("UPDATE documents SET ocr_status = 'Rescan_Required', approval_status = 'Pending' WHERE id = ?", (doc_id,))
+    conn.commit()
+    conn.close()
+    
+    log_audit('document', doc_id, 'RESCAN_REQ', f"Rescan requested: {reason}", user, ip_address=request.remote_addr)
+    
+    return jsonify({"message": "Rescan triggered"}), 200
+
+# --- Workload & SLA Endpoints ---
+@app.route('/workload/stats', methods=['GET'])
+def workload_stats_route():
+    from database.db import get_workload_stats
+    return jsonify(get_workload_stats())
+
+@app.route('/workload/assign', methods=['POST'])
+def assign_work_route():
+    data = request.json
+    doc_ids = data.get('doc_ids', [])
+    user_id = data.get('user_id')
+    assigner = data.get('assigner', 'Admin')
+    
+    if not doc_ids or not user_id:
+        return jsonify({"error": "Missing doc_ids or user_id"}), 400
+        
+    from database.db import assign_documents
+    if assign_documents(doc_ids, user_id, assigner):
+        return jsonify({"message": "Assigned successfully"}), 200
+    return jsonify({"error": "Assignment failed"}), 500
+
+@app.route('/containers/<id>/transfer', methods=['POST'])
+def transfer_container_route(id):
+    data = request.json
+    new_location = data.get('location')
+    user = data.get('user', 'Admin')
+    
+    from database.db import log_transfer, get_db_connection
+    
+    # Get current location
+    conn = get_db_connection()
+    curr = conn.execute("SELECT source_location FROM containers WHERE id = ?", (id,)).fetchone()
+    current_loc = curr['source_location'] if curr else 'Unknown'
+    
+    # Update Container
+    conn.execute("UPDATE containers SET source_location = ? WHERE id = ?", (new_location, id))
+    conn.commit()
+    conn.close()
+    
+    log_transfer(id, current_loc, new_location, user)
+    return jsonify({"message": "Transfer logged"}), 200
+
+@app.route('/containers/<id>/history', methods=['GET'])
+def container_history_route(id):
+    from database.db import get_container_logs
+    return jsonify(get_container_logs(id))
+
+@app.route('/documents/<int:doc_id>/sla', methods=['POST'])
+def update_doc_sla_route(doc_id):
+    # Endpoint to manually update SLA details (for testing or admin override)
+    data = request.json
+    due_date = data.get('due_date')
+    priority = data.get('priority')
+    
+    conn = get_db_connection()
+    if due_date:
+        conn.execute("UPDATE documents SET sla_due_date = ? WHERE id = ?", (due_date, doc_id))
+    if priority:
+        conn.execute("UPDATE documents SET priority = ? WHERE id = ?", (priority, doc_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"message": "SLA updated"}), 200
+
+
 
 @app.route('/documents', methods=['GET'])
 @app.route('/api/documents', methods=['GET'])
@@ -609,6 +859,45 @@ def get_restricted_report_route():
     report = get_restricted_access_report(days)
     return jsonify(report)
 
+@app.route('/access-policies', methods=['GET', 'POST'])
+def manage_access_policies():
+    from database.db import get_db_connection, log_audit
+    
+    conn = get_db_connection()
+    
+    if request.method == 'POST':
+        # Admin check
+        is_admin = request.args.get('is_admin', 'false').lower() == 'true'
+        if not is_admin:
+            conn.close()
+            return jsonify({"error": "Admin access required"}), 403
+            
+        data = request.json
+        role = data.get('role')
+        levels = data.get('allowed_levels') # Comma separated
+        
+        try:
+            # Check if policy exists (handling global policies where department is NULL)
+            existing = conn.execute("SELECT id FROM access_policies WHERE role = ? AND department IS NULL", (role,)).fetchone()
+            
+            if existing:
+                conn.execute("UPDATE access_policies SET allowed_levels = ? WHERE id = ?", (levels, existing['id']))
+            else:
+                conn.execute("INSERT INTO access_policies (role, allowed_levels) VALUES (?, ?)", (role, levels))
+            conn.commit()
+            log_audit('access_policy', 0, 'UPDATE_POLICY', f"Updated access for {role} to {levels}", "Admin")
+            return jsonify({"message": "Policy updated"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        finally:
+            conn.close()
+
+    # GET
+    cursor = conn.execute("SELECT * FROM access_policies")
+    policies = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify(policies)
+
 # --- LIFECYCLE & RETENTION ENDPOINTS ---
 
 def check_legal_hold():
@@ -761,6 +1050,13 @@ def manage_taxonomy():
         
     category = request.args.get('category')
     return jsonify(get_taxonomy(category))
+
+@app.route('/analytics', methods=['GET'])
+def get_analytics_route():
+    import importlib
+    import database.db as db_module
+    importlib.reload(db_module)
+    return jsonify(db_module.get_analytics_stats())
 
 @app.route('/taxonomy/filters', methods=['GET'])
 def get_filter_options():

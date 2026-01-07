@@ -302,7 +302,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                                                     {doc.uid ? doc.uid.split('-')[1] : `#${doc.id}`}
                                                 </div>
                                                 <div style={{ fontSize: '0.7rem', color: '#60a5fa', marginTop: '2px' }}>
-                                                    {doc.uploader_id || 'System'}
+                                                    {doc.owner_id || doc.uploader_id || 'System'}
                                                 </div>
                                             </td>
                                             <td style={{ maxWidth: '300px' }}>

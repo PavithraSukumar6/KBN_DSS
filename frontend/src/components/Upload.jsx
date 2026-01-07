@@ -51,8 +51,13 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
         setFiles(prev => [...prev, ...newFiles]);
     }, []);
 
-    const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
         onDrop,
+        onDropRejected: (fileRejections) => {
+            // FR-22: Robustness - Alert on rejection
+            const errors = fileRejections.map(r => `${r.file.name}: ${r.errors.map(e => e.message).join(', ')}`).join('\n');
+            alert(`Some files were rejected:\n${errors}`);
+        },
         accept: { 'image/*': ['.jpeg', '.jpg', '.png'], 'application/pdf': ['.pdf'] }
     });
 
@@ -73,6 +78,12 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
         if (batchId) {
             formData.append('batch_id', batchId);
         }
+        if (docType) {
+            formData.append('category', docType);
+        }
+        if (selectedDepartment) {
+            formData.append('department', selectedDepartment);
+        }
 
         try {
             const response = await axios.post('http://localhost:5000/upload', formData, {
@@ -86,7 +97,12 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
             });
             return { status: 'success', result: response.data };
         } catch (error) {
-            return { status: 'error', error: error.response?.data?.error || 'Upload failed' };
+            let errorMsg = error.response?.data?.error || 'Upload failed';
+            if (error.response?.status === 409 && error.response?.data?.existing_doc) {
+                const exist = error.response.data.existing_doc;
+                errorMsg = `Duplicate of: ${exist.filename} (Uploaded by ${exist.uploader})`;
+            }
+            return { status: 'error', error: errorMsg };
         }
     };
 
@@ -172,9 +188,28 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
                 </div>
             )}
 
-            <div {...getRootProps()} style={{ border: '2px dashed var(--glass-border)', borderRadius: '12px', padding: '3rem', textAlign: 'center', cursor: isUploading ? 'default' : 'pointer', background: isDragActive ? 'rgba(255, 255, 255, 0.05)' : 'transparent', opacity: isUploading ? 0.6 : 1 }}>
+            <div {...getRootProps()} style={{
+                border: isDragReject ? '2px dashed #f87171' : '2px dashed var(--glass-border)',
+                borderRadius: '12px',
+                padding: '3rem',
+                textAlign: 'center',
+                cursor: isUploading ? 'default' : 'pointer',
+                background: isDragActive ? 'rgba(255, 255, 255, 0.05)' : (isDragReject ? 'rgba(248, 113, 113, 0.05)' : 'transparent'),
+                opacity: isUploading ? 0.6 : 1,
+                minHeight: '200px', // Ensure height for easy drop
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'center',
+                alignItems: 'center'
+            }}>
                 <input {...getInputProps()} disabled={isUploading} />
-                <p style={{ color: 'var(--text-muted)' }}>Drag & drop files here, or click to select</p>
+                <UploadIcon size={48} style={{ color: isDragActive ? '#60a5fa' : 'var(--text-muted)', marginBottom: '1rem' }} />
+                <p style={{ color: 'var(--text-muted)' }}>
+                    {isDragActive ? "Drop files now..." : "Drag & drop files here, or click to select"}
+                </p>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
+                    Supports PDF, PNG, JPG
+                </p>
             </div>
 
             {hasFiles && (

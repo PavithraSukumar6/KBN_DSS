@@ -98,19 +98,27 @@ def init_db():
             ('ocr_status', "TEXT DEFAULT 'Pending'"), ('metadata', 'TEXT'), 
             ('template_type', 'TEXT'), ('is_published', 'INTEGER DEFAULT 0'), 
             ('uploader_id', 'TEXT'), ('approval_status', "TEXT DEFAULT 'Not Required'"),
-            ('uid', 'TEXT UNIQUE')
+            ('uid', 'TEXT'), ('confidentiality_level', 'TEXT'),
+            ('sla_due_date', 'TEXT'), ('priority', "TEXT DEFAULT 'Medium'"), 
+            ('assigned_to', 'TEXT'), ('sla_status', "TEXT DEFAULT 'On Track'")
         ]:
             try:
                 conn.execute(f'ALTER TABLE documents ADD COLUMN {col} {col_type}')
             except sqlite3.OperationalError:
                 pass
 
+        # Create Index for UID
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_uid ON documents(uid)")
+
         # Migration for containers
-        for col, col_type in [('parent_id', 'TEXT'), ('barcode', 'TEXT UNIQUE'), ('name', 'TEXT')]:
+        for col, col_type in [('parent_id', 'TEXT'), ('barcode', 'TEXT'), ('name', 'TEXT')]:
             try:
                 conn.execute(f'ALTER TABLE containers ADD COLUMN {col} {col_type}')
             except sqlite3.OperationalError:
                 pass
+        
+        # Create Index for Barcode
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_containers_barcode ON containers(barcode)")
 
         # Migration for batches (QC Support)
         for col, col_type in [
@@ -124,6 +132,28 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
 
+        # Migration: Add owner_id for Data Governance
+        # Default owner is the system or can be backfilled with uploader
+        try:
+            conn.execute("ALTER TABLE documents ADD COLUMN owner_id TEXT")
+            # Backfill documents: set owner_id = uploader_id if null
+            conn.execute("UPDATE documents SET owner_id = uploader_id WHERE owner_id IS NULL AND uploader_id IS NOT NULL")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            conn.execute("ALTER TABLE containers ADD COLUMN owner_id TEXT")
+            # Backfill containers: set owner_id = created_by if null
+            conn.execute("UPDATE containers SET owner_id = created_by WHERE owner_id IS NULL AND created_by IS NOT NULL")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            conn.execute("ALTER TABLE documents ADD COLUMN content_hash TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_content_hash ON documents(content_hash)")
+        except sqlite3.OperationalError:
+            pass
+
         # Create Taxonomy Table
         conn.execute('''
             CREATE TABLE IF NOT EXISTS taxonomy (
@@ -135,6 +165,29 @@ def init_db():
                 UNIQUE(category, value)
             );
         ''')
+
+        # Access Policies Table (Role-Based Access to Confidentiality Levels)
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS access_policies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                allowed_levels TEXT, -- Comma separated: 'Public,Internal,Confidential'
+                department TEXT, -- Null for global policy
+                UNIQUE(role, department)
+            );
+        ''')
+        
+        # Seed Default Access Policies if empty
+        policy_count = conn.execute("SELECT COUNT(*) FROM access_policies").fetchone()[0]
+        if policy_count == 0:
+            defaults = [
+                ('Admin', 'Public,Internal,Confidential,Restricted', None),
+                ('Manager', 'Public,Internal,Confidential', None),
+                ('Operator', 'Public,Internal', None),
+                ('Viewer', 'Public,Internal', None),
+                ('Intern', 'Public', None)
+            ]
+            conn.executemany("INSERT INTO access_policies (role, allowed_levels, department) VALUES (?, ?, ?)", defaults)
 
         # Seed Taxonomy if empty
         count = conn.execute("SELECT COUNT(*) FROM taxonomy").fetchone()[0]
@@ -341,15 +394,26 @@ def generate_uid(prefix="DOC"):
 
 # ... existing functions ...
 
-def save_document(filename, category, confidence, content, container_id=None, batch_id=None, ocr_status='Processed', metadata=None, template_type=None, uploader_id=None, tags=None):
+def check_duplicate_hash(file_hash):
+    conn = get_db_connection()
+    doc = conn.execute("SELECT id, filename, upload_date, uploader_id FROM documents WHERE content_hash = ?", (file_hash,)).fetchone()
+    conn.close()
+    return dict(doc) if doc else None
+
+def save_document(filename, category, confidence, content, container_id=None, batch_id=None, ocr_status='Processed', metadata=None, template_type=None, uploader_id=None, tags=None, owner_id=None, content_hash=None):
     conn = get_db_connection()
     upload_date = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     doc_uid = generate_uid()
+    
+    # Default owner to uploader if not specified
+    if not owner_id and uploader_id:
+        owner_id = uploader_id
+
     with conn:
         cursor = conn.execute('''
-            INSERT INTO documents (filename, category, confidence, content, upload_date, container_id, batch_id, ocr_status, metadata, template_type, uploader_id, tags, uid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (filename, category, confidence, content, upload_date, container_id, batch_id, ocr_status, metadata, template_type, uploader_id, tags, doc_uid))
+            INSERT INTO documents (filename, category, confidence, content, upload_date, container_id, batch_id, ocr_status, metadata, template_type, uploader_id, tags, uid, owner_id, confidentiality_level, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (filename, category, confidence, content, upload_date, container_id, batch_id, ocr_status, metadata, template_type, uploader_id, tags, doc_uid, owner_id, 'Internal', content_hash))
     doc_id = cursor.lastrowid
     conn.close()
     return doc_id
@@ -426,11 +490,16 @@ def create_container(data):
     barcode = data.get('barcode') or generate_barcode()
     name = data.get('name') or data.get('id')
 
+    container_id = data.get('id') or f"CONT-{uuid.uuid4().hex[:8].upper()}"
+    barcode = data.get('barcode') or generate_barcode()
+    name = data.get('name') or data.get('id')
+    owner = data.get('owner_id') or data.get('created_by')
+
     try:
         cursor.execute('''
-            INSERT INTO containers (id, name, subsidiary, department, function, date_range, confidentiality_level, source_location, created_by, created_at, physical_page_count, parent_id, barcode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (container_id, name, data.get('subsidiary'), data.get('department'), data.get('function'), data.get('date_range'), data.get('confidentiality_level'), data.get('source_location'), data.get('created_by'), created_at, data.get('physical_page_count', 0), data.get('parent_id'), barcode))
+            INSERT INTO containers (id, name, subsidiary, department, function, date_range, confidentiality_level, source_location, created_by, created_at, physical_page_count, parent_id, barcode, owner_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (container_id, name, data.get('subsidiary'), data.get('department'), data.get('function'), data.get('date_range'), data.get('confidentiality_level'), data.get('source_location'), data.get('created_by'), created_at, data.get('physical_page_count', 0), data.get('parent_id'), barcode, owner))
         conn.commit()
         return container_id
     except sqlite3.IntegrityError:
@@ -448,7 +517,14 @@ def log_transfer(container_id, previous_loc, new_loc, transferred_by):
         VALUES (?, ?, ?, ?, ?)
     ''', (container_id, previous_loc, new_loc, transferred_by, timestamp))
     conn.commit()
+    conn.commit()
     conn.close()
+
+def get_container_logs(container_id):
+    conn = get_db_connection()
+    logs = conn.execute("SELECT * FROM transfer_log WHERE container_id = ? ORDER BY timestamp DESC", (container_id,)).fetchall()
+    conn.close()
+    return [dict(row) for row in logs]
 
 def update_batch_qc(batch_id, status, notes, user):
     conn = get_db_connection()
@@ -461,6 +537,13 @@ def update_batch_qc(batch_id, status, notes, user):
     ''', (status, notes, user, date, batch_id))
     conn.commit()
     conn.close()
+
+def get_qc_queue_batches():
+    conn = get_db_connection()
+    cursor = conn.execute("SELECT * FROM batches WHERE status IN ('Pending', 'In Progress') ORDER BY start_time DESC")
+    batches = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return batches
 
 def log_audit(entity_type, entity_id, action, details, user, old_value=None, new_value=None, ip_address=None, scope=None):
     conn = get_db_connection()
@@ -579,34 +662,51 @@ def get_filtered_documents(category=None, start_date=None, end_date=None, search
     
     # Defaults if user not found (Guest)
     role = user_role_data['role'] if user_role_data else 'Viewer'
-    scope = user_role_data['scope'] if user_role_data else 'Holding'
+    scope = user_role_data['scope'] if user_role_data else 'Holding' # Holding means Global
     scope_val = user_role_data['assigned_scope_value'] if user_role_data else 'KBN Group'
 
-    # Admin sees all (bypass filters)
+    # 2. Need-to-Know: Department Isolation
+    # If not Admin and scope is limited, strictly filter by container department
     if role != 'Admin' and not is_admin:
-        # Scope Filter: Operator/Viewer restricted to their scope
         if scope == 'Subsidiary':
             query += " AND c.subsidiary = ?"
             params.append(scope_val)
         elif scope == 'Department':
+            # Strict Isolation: Only documents in this Department's containers
+            # OR documents explicitly shared (access_requests)? For now, strict isolation.
             query += " AND c.department = ?"
             params.append(scope_val)
-            
-        # Confidentiality Filter
-        # Visible if:
-        # 1. Not Confidential/Restricted
-        # 2. OR User is Uploader
-        # 3. OR Access Request Approved (Joined from access_requests check?) - simpler to hide content but show in list?
-        # Requirement: "'Restricted' files must only be visible to the Owner and Admins."
-        # Requirement: "If a document is restricted, show a 'Request Access' button." => Implies it IS visible in the list.
-        
-        # So we logic: SHOW the record, but maybe mark it. 
-        # But wait, "visible to Owner and Admins" usually means hidden from list.
-        # "Show a Request Access button" implies finding it. 
-        # Let's interpret: "Restricted" metadata is hidden? Or file is listed but content/download blocked?
-        # Let's show it in the list so they can request access.
-        pass 
 
+        # 3. Confidentiality Clearance (Role-Based)
+        # Fetch allowed levels for this role (Global policy for now, could be Dept specific)
+        policy = conn.execute("SELECT allowed_levels FROM access_policies WHERE role = ? LIMIT 1", (role,)).fetchone()
+        allowed_levels_str = policy['allowed_levels'] if policy else 'Public,Internal'
+        allowed_levels = [l.strip() for l in allowed_levels_str.split(',')]
+        
+        # Build strict filter: (Level IN allowed OR Owner OR Admin OR Access Approved)
+        # Assuming is_admin handles Admin case.
+        # We need to filter rows where:
+        # (effective_confidentiality IN allowed_levels) OR (uploader_id = user) OR (owner_id = user)
+        # Since effective_confidentiality is calculated in SELECT, we might need a WHERE clause using COALESCE(d.confidentiality, c.confidentiality, 'Internal')
+        
+        placeholders = ','.join(['?'] * len(allowed_levels))
+        
+        # We add the permission logic. Note: 'access_status' check logic for specific docs is complex in WHERE.
+        # But we can check access_requests table.
+        
+        # Complex permission block
+        permission_clause = f"""
+            AND (
+                COALESCE(d.confidentiality_level, c.confidentiality_level, 'Internal') IN ({placeholders})
+                OR d.uploader_id = ?
+                OR d.owner_id = ?
+                OR EXISTS (SELECT 1 FROM access_requests ar WHERE ar.document_id = d.id AND ar.user_id = ? AND ar.status = 'Approved')
+            )
+        """
+        query += permission_clause
+        params.extend(allowed_levels)
+        params.extend([user_id, user_id, user_id])
+    
     if only_published:
         query += " AND d.is_published = 1"
 
@@ -628,6 +728,9 @@ def get_filtered_documents(category=None, start_date=None, end_date=None, search
             query += " AND d.is_published = 1"
         elif status == 'Pending':
             query += " AND d.approval_status = 'Pending Approval'"
+        elif status in ['Soft_Deleted', 'Pending_Deletion', 'Archived', 'Intake']:
+             query += " AND d.status = ?"
+             params.append(status)
         else:
             query += " AND d.ocr_status = ?"
             params.append(status)
@@ -668,8 +771,8 @@ def get_filtered_documents(category=None, start_date=None, end_date=None, search
             LEFT JOIN favorites fav ON d.id = fav.document_id AND fav.user_id = ?
             WHERE f.documents_fts MATCH ? AND """ + query[query.find("WHERE")+6:] # Reuse filters
         params.insert(0, user_id) # For access_status subquery
-        params.insert(2, user_id) # For favorites join
-        params.insert(3, search)
+        # params[1] is already user_id (from original params initialization for favorites)
+        params.insert(2, search)
         query += " ORDER BY relevance ASC, d.upload_date DESC"
     else:
         # Non-search query
@@ -737,20 +840,34 @@ def get_analytics_stats():
     
     # 2. By Category
     cat_cursor = conn.execute("SELECT category, COUNT(*) as count FROM documents GROUP BY category")
-    by_category = {row['category']: row['count'] for row in cat_cursor.fetchall()}
+    by_category = {str(row['category'] or 'Unclassified'): row['count'] for row in cat_cursor.fetchall()}
     
     # 3. By Status (OCR Status)
-    status_cursor = conn.execute("SELECT ocr_status, COUNT(*) as count FROM documents GROUP BY ocr_status")
-    by_status = {row['ocr_status']: row['count'] for row in status_cursor.fetchall()}
+    try:
+        status_cursor = conn.execute("SELECT ocr_status, COUNT(*) as count FROM documents GROUP BY ocr_status")
+        by_status = {str(row['ocr_status'] or 'Unknown'): row['count'] for row in status_cursor.fetchall()}
+    except Exception as e:
+        print(f"Error in status stats: {e}")
+        by_status = {}
+    except Exception as e:
+        print(f"Error in status stats: {e}")
+        by_status = {}
     
     # 4. Daily Throughput
-    throughput_cursor = conn.execute("""
-        SELECT date(upload_date) as date, COUNT(*) as count 
-        FROM documents 
-        GROUP BY date(upload_date) 
-        ORDER BY date DESC LIMIT 7
-    """)
-    daily_throughput = [dict(row) for row in throughput_cursor.fetchall()]
+    try:
+        throughput_cursor = conn.execute("""
+            SELECT date(upload_date) as date, COUNT(*) as count 
+            FROM documents 
+            GROUP BY date(upload_date) 
+            ORDER BY date DESC LIMIT 7
+        """)
+        daily_throughput = [dict(row) for row in throughput_cursor.fetchall()]
+        # Sort manually to be safe? No, SQL handles it.
+        # Check for None dates
+        daily_throughput = [d for d in daily_throughput if d['date']]
+    except Exception as e:
+        print(f"Error in throughput stats: {e}")
+        daily_throughput = []
     
     conn.close()
     return {
@@ -788,6 +905,54 @@ def update_taxonomy_status(item_id, status):
     conn = get_db_connection()
     conn.execute("UPDATE taxonomy SET status = ? WHERE id = ?", (status, item_id))
     conn.commit()
+    conn.close()
+
+def assign_documents(doc_ids, user_id, assigner):
+    conn = get_db_connection()
+    try:
+        # doc_ids is a list of IDs
+        placeholders = ','.join(['?'] * len(doc_ids))
+        conn.execute(f"UPDATE documents SET assigned_to = ? WHERE id IN ({placeholders})", [user_id] + doc_ids)
+        conn.commit()
+        
+        # Log audit for each? Or one bulk log? Bulk log is cleaner for system, but singular logs better for history.
+        # Let's do one bulk log entry for the batch of assignments to avoid spamming audit log
+        log_audit('workload', 0, 'ASSIGN_BULK', f"Assigned {len(doc_ids)} docs to {user_id}", assigner)
+        return True
+    except Exception as e:
+        print(f"Assignment failed: {e}")
+        return False
+    finally:
+        conn.close()
+
+def update_sla_status(doc_id, status):
+    conn = get_db_connection()
+    conn.execute("UPDATE documents SET sla_status = ? WHERE id = ?", (status, doc_id))
+    conn.commit()
+    conn.close()
+
+def get_workload_stats():
+    conn = get_db_connection()
+    
+    # By Status
+    status_counts = {row['ocr_status']: row['count'] for row in conn.execute("SELECT ocr_status, COUNT(*) as count FROM documents GROUP BY ocr_status").fetchall()}
+    
+    # By SLA Status
+    sla_counts = {row['sla_status']: row['count'] for row in conn.execute("SELECT sla_status, COUNT(*) as count FROM documents WHERE sla_status IS NOT NULL GROUP BY sla_status").fetchall()}
+    
+    # By Assignee
+    assignee_counts = {row['assigned_to']: row['count'] for row in conn.execute("SELECT assigned_to, COUNT(*) as count FROM documents WHERE assigned_to IS NOT NULL GROUP BY assigned_to").fetchall()}
+    
+    # Priority Breakdown
+    priority_counts = {row['priority']: row['count'] for row in conn.execute("SELECT priority, COUNT(*) as count FROM documents GROUP BY priority").fetchall()}
+
+    conn.close()
+    return {
+        "status_distribution": status_counts,
+        "sla_status": sla_counts,
+        "assignee_load": assignee_counts,
+        "priority_breakdown": priority_counts
+    }
     conn.close()
 
 # --- Metadata Validation (FR-15) ---
