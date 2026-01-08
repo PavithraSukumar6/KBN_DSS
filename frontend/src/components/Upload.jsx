@@ -84,6 +84,9 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
         if (selectedDepartment) {
             formData.append('department', selectedDepartment);
         }
+        if (isFastTrack) {
+            formData.append('fast_track', 'true');
+        }
 
         try {
             const response = await axios.post('http://localhost:5000/upload', formData, {
@@ -256,6 +259,7 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
                                     {f.status === 'uploading' && <Loader2 size={18} className="spin" />}
                                 </div>
                                 {f.status === 'uploading' && <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', borderRadius: '2px', marginTop: '0.5rem' }}><div style={{ width: `${f.progress}%`, height: '100%', background: '#60a5fa' }} /></div>}
+                                {f.status === 'error' && <div style={{ fontSize: '0.8rem', color: '#f87171', marginTop: '0.25rem' }}>{f.error}</div>}
                             </div>
                             {f.status === 'idle' && !isUploading && <button onClick={() => removeFile(f.id)} style={{ background: 'none', border: 'none', color: '#f87171', cursor: 'pointer' }}><X size={18} /></button>}
                         </div>

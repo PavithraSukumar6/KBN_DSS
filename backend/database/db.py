@@ -1,5 +1,8 @@
 import sqlite3
 import datetime
+import os
+import shutil
+from werkzeug.security import generate_password_hash, check_password_hash
 
 DB_NAME = 'documents.db'
 
@@ -40,8 +43,10 @@ def init_db():
                 physical_page_count INTEGER DEFAULT 0,
                 parent_id TEXT,
                 barcode TEXT UNIQUE,
+                status TEXT DEFAULT 'Active',
                 FOREIGN KEY(parent_id) REFERENCES containers(id)
             );
+
 
             CREATE TABLE IF NOT EXISTS transfer_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,7 +116,7 @@ def init_db():
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_uid ON documents(uid)")
 
         # Migration for containers
-        for col, col_type in [('parent_id', 'TEXT'), ('barcode', 'TEXT'), ('name', 'TEXT')]:
+        for col, col_type in [('parent_id', 'TEXT'), ('barcode', 'TEXT'), ('name', 'TEXT'), ('status', "TEXT DEFAULT 'Active'")]:
             try:
                 conn.execute(f'ALTER TABLE containers ADD COLUMN {col} {col_type}')
             except sqlite3.OperationalError:
@@ -336,7 +341,8 @@ def init_db():
                 name TEXT,
                 role TEXT, -- 'Admin', 'Operator', 'Viewer'
                 scope TEXT, -- 'Holding', 'Subsidiary', 'Department'
-                assigned_scope_value TEXT -- e.g. 'Finance' or 'KBN Group'
+                assigned_scope_value TEXT, -- e.g. 'Finance' or 'KBN Group'
+                password_hash TEXT
             );
 
             CREATE TABLE IF NOT EXISTS access_requests (
@@ -353,16 +359,17 @@ def init_db():
             );
         ''')
 
-        # Seed Users
+        # Seed Users (FR-22)
         user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if user_count == 0:
             users = [
-                ('Gokul_Admin', 'Gokul Admin', 'Admin', 'Holding', 'KBN Group'),
-                ('Operator_Finance', 'Fin Operator', 'Operator', 'Department', 'Finance'),
-                ('Operator_HR', 'HR Operator', 'Operator', 'Department', 'HR'),
-                ('Viewer_Guest', 'Guest Viewer', 'Viewer', 'Holding', 'KBN Group')
+                ('Gokul_Admin', 'Gokul Admin', 'Admin', 'Holding', 'KBN Group', generate_password_hash('admin123')),
+                ('Manager_Dave', 'Dave Manager', 'Manager', 'Subsidiary', 'KBN Group', generate_password_hash('manager123')),
+                ('Operator_Sue', 'Sue Operator', 'Operator', 'Department', 'Finance', generate_password_hash('operator123')),
+                ('Viewer_Tom', 'Tom Viewer', 'Viewer', 'Department', 'Sales', generate_password_hash('viewer123')),
+                ('Intern_Joe', 'Joe Intern', 'Intern', 'Department', 'Operations', generate_password_hash('intern123'))
             ]
-            conn.executemany("INSERT INTO users (id, name, role, scope, assigned_scope_value) VALUES (?, ?, ?, ?, ?)", users)
+            conn.executemany("INSERT INTO users (id, name, role, scope, assigned_scope_value, password_hash) VALUES (?, ?, ?, ?, ?, ?)", users)
 
         # Migration: Add confidentiality_level to documents
         try:
@@ -406,6 +413,17 @@ def init_db():
         conn.commit()
     except sqlite3.OperationalError:
         pass
+        
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        # Update existing user if any (default password)
+        # We can't easily hash here without import, but import is at top now.
+        default_hash = generate_password_hash('password123')
+        conn.execute("UPDATE users SET password_hash = ? WHERE password_hash IS NULL", (default_hash,))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+        
     finally:
         conn.close()
 
@@ -442,6 +460,19 @@ def save_document(filename, category, confidence, content, container_id=None, ba
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (filename, category, confidence, content, upload_date, container_id, batch_id, ocr_status, metadata, template_type, uploader_id, tags, doc_uid, owner_id, 'Internal', content_hash))
     doc_id = cursor.lastrowid
+    
+    # Increment container physical page count
+    if container_id:
+        # Assuming 1 document = 1 physical page for now, or use page_count if available
+        # But save_document doesn't take page_count arg properly in all calls? 
+        # It's not in the args list here, but let's assume 1 or use a default.
+        # Check if page_count is in metadata or args? 
+        # Actually save_document is called by app.py. app.py doesn't pass page_count.
+        # We will assume 1 for now or fetch from DB update later? 
+        # Let's just increment by 1.
+        conn.execute("UPDATE containers SET physical_page_count = physical_page_count + 1 WHERE id = ?", (container_id,))
+        
+    conn.commit() # Commit both the insert and the update
     conn.close()
     return doc_id
 
@@ -559,9 +590,9 @@ def update_batch_qc(batch_id, status, notes, user):
     date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         UPDATE batches 
-        SET qc_status = ?, qc_notes = ?, qc_by = ?, qc_date = ? 
+        SET status = ?, qc_status = ?, qc_notes = ?, qc_by = ?, qc_date = ? 
         WHERE id = ?
-    ''', (status, notes, user, date, batch_id))
+    ''', (status, status, notes, user, date, batch_id))
     conn.commit()
     conn.close()
 

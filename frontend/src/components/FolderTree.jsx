@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { ChevronRight, ChevronDown, Folder, FolderOpen, Box } from 'lucide-react';
+import { ChevronRight, ChevronDown, Folder, FolderOpen, Box, Trash2 } from 'lucide-react';
 
-const FolderNode = ({ node, containers, onSelect, selectedId, level = 0 }) => {
+const FolderNode = ({ node, containers, onSelect, selectedId, level = 0, onDelete }) => {
     const [isOpen, setIsOpen] = useState(level === 0); // Root open by default
     const children = containers.filter(c => c.parent_id === node.id);
     const isSelected = selectedId === node.id;
@@ -37,9 +37,18 @@ const FolderNode = ({ node, containers, onSelect, selectedId, level = 0 }) => {
                 )}
 
                 {isOpen ? <FolderOpen size={18} className="folder-icon" /> : <Folder size={18} className="folder-icon" />}
-                <span style={{ fontSize: '0.9rem', fontWeight: isSelected ? '600' : '400' }}>
+                <span style={{ fontSize: '0.9rem', fontWeight: isSelected ? '600' : '400', flex: 1 }}>
                     {node.name || node.id}
                 </span>
+                {onDelete && (
+                    <span
+                        onClick={(e) => { e.stopPropagation(); onDelete(node.id); }}
+                        className="delete-icon"
+                        title="Delete Container"
+                    >
+                        <Trash2 size={14} />
+                    </span>
+                )}
             </div>
 
             {isOpen && children.length > 0 && (
@@ -52,6 +61,7 @@ const FolderNode = ({ node, containers, onSelect, selectedId, level = 0 }) => {
                             onSelect={onSelect}
                             selectedId={selectedId}
                             level={level + 1}
+                            onDelete={onDelete}
                         />
                     ))}
                 </div>
@@ -65,15 +75,25 @@ const FolderNode = ({ node, containers, onSelect, selectedId, level = 0 }) => {
                 .folder-item.active {
                     color: #60a5fa;
                 }
-                .folder-icon {
-                    color: #fbbf24;
+                .folder-item:hover .delete-icon {
+                    opacity: 1;
+                }
+                .delete-icon {
+                    opacity: 0;
+                    color: #ef4444;
+                    padding: 4px;
+                    border-radius: 4px;
+                    transition: opacity 0.2s;
+                }
+                .delete-icon:hover {
+                    background: rgba(239, 68, 68, 0.2);
                 }
             `}</style>
         </div>
     );
 };
 
-const FolderTree = ({ containers = [], onSelect, selectedId }) => {
+const FolderTree = ({ containers = [], onSelect, selectedId, onDelete }) => {
     // Find root nodes (those with no parent or parent 'ROOT' if we start from KBN)
     const roots = (containers || []).filter(c => !c.parent_id || c.id === 'ROOT');
 
@@ -86,6 +106,7 @@ const FolderTree = ({ containers = [], onSelect, selectedId }) => {
                     containers={containers}
                     onSelect={onSelect}
                     selectedId={selectedId}
+                    onDelete={onDelete}
                 />
             ))}
         </div>

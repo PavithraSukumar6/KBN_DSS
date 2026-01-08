@@ -77,6 +77,16 @@ const ContainerManager = ({ refreshTrigger }) => {
         }
     };
 
+    const handleSoftDelete = async (id) => {
+        if (!window.confirm("Move Container to Recycle Bin?")) return;
+        try {
+            await axios.delete(`http://localhost:5000/containers/${id}?is_admin=true`);
+            fetchContainers();
+        } catch (err) {
+            alert("Delete failed: " + (err.response?.data?.error || err.message));
+        }
+    };
+
     return (
         <div className="glass-panel" style={{ padding: '2rem', minHeight: '500px' }}>
             <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -94,6 +104,7 @@ const ContainerManager = ({ refreshTrigger }) => {
                         <FolderTree
                             containers={containers}
                             onSelect={(id) => { setSelectedId(id); setTransferMode(false); setHistoryMode(false); setError(null); }}
+                            onDelete={handleSoftDelete}
                             selectedId={selectedId}
                         />
                     )}

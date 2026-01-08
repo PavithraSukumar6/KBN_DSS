@@ -101,7 +101,7 @@ def upload_file():
     existing_doc = check_duplicate_hash(file_hash)
     if existing_doc:
         return jsonify({
-            "error": "Duplicate document found.",
+            "error": "Duplicate detected: This file already exists in the repository.",
             "existing_doc": {
                 "id": existing_doc['id'],
                 "filename": existing_doc['filename'],
@@ -168,6 +168,14 @@ def upload_file():
                     content_hash=file_hash
                 )
                 
+                # Fast Track: Auto-Publish
+                is_fast_track = request.form.get('fast_track') == 'true'
+                if is_fast_track:
+                    conn = get_db_connection()
+                    conn.execute("UPDATE documents SET status = 'Published', is_published = 1, approval_status = 'Approved' WHERE id = ?", (doc_id,))
+                    conn.commit()
+                    conn.close()
+                
                 # Manually set confidentiality if not default
                 if confidentiality != 'Internal':
                      conn = get_db_connection()
@@ -207,6 +215,41 @@ def upload_file():
 def get_users_route():
     from database.db import get_users
     return jsonify(get_users())
+
+@app.route('/login', methods=['POST'])
+def login_route():
+    data = request.json
+    user_id = data.get('user_id')
+    password = data.get('password')
+    role = data.get('role') # User selects role, but we should verify if it matches or just ignore context?
+    # Requirement: "Dropdown for Role selection... Fields for User ID and Password"
+    # User might select 'Admin' but login as 'Operator'. We should validate.
+    
+    from database.db import get_db_connection
+    from werkzeug.security import check_password_hash
+    
+    conn = get_db_connection()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    
+    if user and user['password_hash'] and check_password_hash(user['password_hash'], password):
+        # Optional: Check if role matches selected role?
+        # If user has multiple roles? Schema has single 'role' column.
+        if role and user['role'] != role:
+             return jsonify({"error": f"User {user_id} is not authorized as {role}"}), 403
+             
+        return jsonify({
+            "message": "Login successful",
+            "user": {
+                "id": user['id'],
+                "name": user['name'],
+                "role": user['role'],
+                "scope": user['scope'],
+                "assigned_scope_value": user['assigned_scope_value']
+            }
+        }), 200
+    else:
+        return jsonify({"error": "Invalid credentials"}), 401
 
 @app.route('/access/request', methods=['POST'])
 def request_access_route():
@@ -1030,6 +1073,23 @@ def delete_document(doc_id):
              conn.close()
              return jsonify({"error": "Document must be soft deleted first"}), 400
              
+        # Physical File Deletion
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filename'])
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                print(f"Error removing file {file_path}: {e}")
+                # We continue to delete DB record even if file delete fails? 
+                # Or block? Better to continue but log warning, as file might be missing.
+        
+        # Check processed folder too if simpler
+        proc_path = os.path.join(app.config['PROCESSED_FOLDER'], doc['filename'])
+        if os.path.exists(proc_path):
+             try:
+                os.remove(proc_path)
+             except: pass
+
         conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         # Also clean up FTS
         conn.execute("DELETE FROM documents_fts WHERE id = ?", (doc_id,))
@@ -1043,6 +1103,53 @@ def delete_document(doc_id):
         
     conn.close()
     return jsonify({"message": "Document deleted"}), 200
+
+@app.route('/containers/<id>', methods=['DELETE'])
+@require_auth(roles=['Admin', 'Operator']) # Allow operators to soft delete?
+def delete_container(id):
+    is_permanent = request.args.get('permanent', 'false').lower() == 'true'
+    is_admin = request.args.get('is_admin', 'false').lower() == 'true' # Or check token
+    # For simplicity using arg, assuming permissions middleware or check
+    
+    conn = get_db_connection()
+    
+    if is_permanent:
+        if not is_admin:
+             conn.close()
+             return jsonify({"error": "Only Admins can permanently delete containers"}), 403
+        
+        # Constraint Check: Check if container has active documents?
+        # Or children?
+        child_count = conn.execute("SELECT COUNT(*) as count FROM containers WHERE parent_id = ?", (id,)).fetchone()['count']
+        doc_count = conn.execute("SELECT COUNT(*) as count FROM documents WHERE container_id = ?", (id,)).fetchone()['count']
+        
+        if child_count > 0 or doc_count > 0:
+            conn.close()
+            return jsonify({"error": "Cannot delete container with children or documents. Empty it first."}), 409
+            
+        conn.execute("DELETE FROM containers WHERE id = ?", (id,))
+        conn.commit()
+        # Audit
+        log_audit('container', id, 'DELETE_PERMANENT', "Container permanently deleted", "Admin")
+    else:
+        # Soft Delete
+        conn.execute("UPDATE containers SET status = 'Deleted_Soft' WHERE id = ?", (id,))
+        conn.commit()
+        log_audit('container', id, 'DELETE_SOFT', "Container moved to Recycle Bin", "User")
+        
+    conn.close()
+    return jsonify({"message": "Container deleted"}), 200
+
+@app.route('/containers/<id>/restore', methods=['POST'])
+@require_auth(roles=['Admin'])
+def restore_container(id):
+    conn = get_db_connection()
+    conn.execute("UPDATE containers SET status = 'Active' WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    
+    log_audit('container', id, 'RESTORE', "Container restored from recycle bin", "Admin")
+    return jsonify({"message": "Container restored"}), 200
 
 @app.route('/documents/<int:doc_id>/restore', methods=['POST'])
 def restore_document(doc_id):

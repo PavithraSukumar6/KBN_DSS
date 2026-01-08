@@ -3,7 +3,7 @@ import axios from 'axios';
 import FilterSidebar from './FilterSidebar';
 import DocumentViewer from './DocumentViewer';
 import FolderTree from './FolderTree';
-import { Search, FileText, Info, Star, Download, Filter, FolderTree as FolderIcon } from 'lucide-react';
+import { Search, FileText, Info, Star, Download, Filter, FolderTree as FolderIcon, Trash2 } from 'lucide-react';
 
 const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
     const [documents, setDocuments] = useState([]);
@@ -29,7 +29,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
         start_date: '',
         end_date: '',
         approval_status: '',
-        status: '',
+        status: 'Published',
         subsidiary: '',
         department: '',
         function: '',
@@ -204,6 +204,17 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
             fetchDocuments();
         } catch (err) {
             alert('Reclassification failed.');
+        }
+    };
+
+    const handleSoftDelete = async (doc) => {
+        if (!window.confirm("Move to Recycle Bin?")) return;
+        try {
+            await axios.delete(`http://localhost:5000/documents/${doc.id}?user_id=${currentUser?.id}`);
+            // Optimistic update
+            setDocuments(prev => prev.filter(d => d.id !== doc.id));
+        } catch (err) {
+            alert("Delete failed: " + (err.response?.data?.error || err.message));
         }
     };
 
@@ -412,6 +423,14 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                                                     </button>
                                                 ) : null}
                                                 {isAdmin && <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }} onClick={() => openDetails(doc)}>Details</button>}
+                                                <button
+                                                    className="btn btn-ghost"
+                                                    style={{ padding: '0.4rem', color: '#ef4444' }}
+                                                    onClick={(e) => { e.stopPropagation(); handleSoftDelete(doc); }}
+                                                    title="Move to Trash"
+                                                >
+                                                    <Trash2 size={16} />
+                                                </button>
                                             </td>
                                         </tr>
                                     );
