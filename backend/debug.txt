@@ -1,0 +1,26 @@
+DEBUG: Starting background thread for Doc 218 Path: D:\KBN\KBN_Project\backend\uploads\57d9173c_test_autonaming.png
+DEBUG: Thread started for Doc 218
+DEBUG: Background Worker Running for 218
+DEBUG: OCR Result for 218: Conf=72.83, TextLen=57
+DEBUG: Starting background thread for Doc 219 Path: D:\KBN\KBN_Project\backend\uploads\ca744117_test_autonaming.png
+DEBUG: Background Worker Running for 219
+DEBUG: Thread started for Doc 219
+DEBUG: OCR Result for 219: Conf=74.33, TextLen=56
+DEBUG: Starting background thread for Doc 220 Path: D:\KBN\KBN_Project\backend\uploads\a9fc6db2_test_autonaming.png
+DEBUG: Background Worker Running for 220
+DEBUG: Thread started for Doc 220
+DEBUG: OCR Result for 220: Conf=74.96, Text=INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, IN...
+DEBUG: Classified 220 as Invoice (Conf: 0.95)
+DEBUG: Starting background thread for Doc 221 Path: D:\KBN\KBN_Project\backend\uploads\ec8e379e_test_autonaming.png
+DEBUG: Thread started for Doc 221
+DEBUG: Background Worker Running for 221
+DEBUG: OCR Result for 221: Conf=75.54, Text=INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, IN...
+DEBUG: Classified 221 as Invoice (Conf: 0.95)
+DEBUG: Renamed/Moved to D:\KBN\KBN_Project\backend\uploads\processed\2026-01-15\Invoice_221_2026-01-15.png
+DEBUG: Error in renaming/moving: no such column: file_path
+DEBUG: Starting background thread for Doc 222 Path: D:\KBN\KBN_Project\backend\uploads\a7afe608_test_autonaming.png
+DEBUG: Background Worker Running for 222
+DEBUG: Thread started for Doc 222
+DEBUG: OCR Result for 222: Conf=73.42, Text=INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, INVOKE 12345, IN...
+DEBUG: Classified 222 as Invoice (Conf: 0.95)
+DEBUG: Renamed/Moved to D:\KBN\KBN_Project\backend\uploads\processed\2026-01-15\Invoice_222_2026-01-15.png

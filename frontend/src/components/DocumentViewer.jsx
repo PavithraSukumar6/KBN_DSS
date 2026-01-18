@@ -2,32 +2,94 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { X, FileText, Download, Star, History, Info, ChevronRight, ChevronLeft } from 'lucide-react';
 
-const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
+const DocumentViewer = ({ doc: initialDoc, onClose, isAdmin, user_id }) => {
+    const [currentDoc, setCurrentDoc] = useState(initialDoc);
     const [activeTab, setActiveTab] = useState('metadata');
     const [versions, setVersions] = useState([]);
     const [auditLogs, setAuditLogs] = useState([]);
-    const [isFavorite, setIsFavorite] = useState(doc.is_favorite === 1);
+    const [isFavorite, setIsFavorite] = useState(initialDoc.is_favorite === 1);
     const [loading, setLoading] = useState(false);
+    const [uploadingVersion, setUploadingVersion] = useState(false);
 
     useEffect(() => {
+        let isActive = true;
+        const requestId = Math.random().toString(36).substring(7);
+        console.log(`[Viewer] Fetching data for ID: ${currentDoc.id} (ReqID: ${requestId})`);
+
         const fetchData = async () => {
             try {
                 const [vRes, aRes] = await Promise.all([
-                    axios.get(`http://localhost:5000/documents/${doc.id}/versions`),
-                    axios.get(`http://localhost:5000/audit/document/${doc.id}`)
+                    axios.get(`http://localhost:5000/documents/${currentDoc.id}/versions`),
+                    axios.get(`http://localhost:5000/audit/document/${currentDoc.id}`)
                 ]);
-                setVersions(vRes.data);
-                setAuditLogs(aRes.data);
+
+                if (isActive) {
+                    setVersions(vRes.data);
+                    setAuditLogs(aRes.data);
+                }
             } catch (err) {
-                console.error("Failed to fetch document details", err);
+                if (isActive) console.error("Failed to fetch document details", err);
             }
         };
         fetchData();
-    }, [doc.id]);
+
+        return () => { isActive = false; };
+    }, [currentDoc.id]);
+
+    const handleVersionSwitch = async (versionDocId) => {
+        if (versionDocId === currentDoc.id) return;
+        setLoading(true);
+        try {
+            const res = await axios.get(`http://localhost:5000/documents/${versionDocId}/details`);
+            setCurrentDoc(res.data);
+            setIsFavorite(res.data.is_favorite === 1); // Reset favorite state for new doc
+        } catch (err) {
+            console.error("Failed to load version details", err);
+            alert("Could not load version details.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleUploadVersion = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        setUploadingVersion(true);
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('parent_doc_id', currentDoc.id); // Parent ID logic handled by backend (will resolve to root)
+        formData.append('uploader_id', user_id);
+        formData.append('container_id', currentDoc.container_id || '');
+        formData.append('category', currentDoc.category); // Preserve category
+        // Preserve other metadata if needed, or let backend handle defaults
+
+        try {
+            await axios.post('http://localhost:5000/upload', formData, {
+                headers: { 'Content-Type': 'multipart/form-data' }
+            });
+            alert("New version uploaded successfully!");
+            // Refresh logic: The upload endpoint returns the new doc details usually?
+            // Actually app.py /upload returns { documents: [...] }
+            // Ideally we re-fetch the latest version via the versions list or just reload.
+            // Let's reload the versions list, find the new top one, and switch to it.
+            const vRes = await axios.get(`http://localhost:5000/documents/${currentDoc.id}/versions`);
+            setVersions(vRes.data);
+            // Switch to latest (first in list hopefully)
+            if (vRes.data.length > 0) {
+                handleVersionSwitch(vRes.data[0].id);
+            }
+        } catch (err) {
+            console.error(err);
+            alert("Failed to upload new version.");
+        } finally {
+            setUploadingVersion(false);
+        }
+    };
 
     const handleToggleFavorite = async () => {
         try {
-            const res = await axios.post(`http://localhost:5000/favorites?user_id=${user_id}`, { document_id: doc.id });
+            const res = await axios.post(`http://localhost:5000/favorites?user_id=${user_id}`, { document_id: currentDoc.id });
             setIsFavorite(res.data.is_favorite);
         } catch (err) {
             console.error("Failed to toggle favorite", err);
@@ -37,25 +99,25 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
     const handleDownload = async () => {
         try {
             const response = await axios({
-                url: `http://localhost:5000/documents/download/${doc.id}?is_admin=${isAdmin}&user_id=${user_id}`,
+                url: `http://localhost:5000/documents/download/${currentDoc.id}?is_admin=${isAdmin}&user_id=${user_id}`,
                 method: 'GET',
                 responseType: 'blob',
             });
             const url = window.URL.createObjectURL(new Blob([response.data]));
             const link = document.createElement('a');
             link.href = url;
-            link.setAttribute('download', doc.filename);
+            link.setAttribute('download', currentDoc.filename);
             document.body.appendChild(link);
             link.click();
             link.remove();
         } catch (err) {
-            alert("Download failed. You may not have permissions for this file.");
+            alert("Download failed.");
         }
     };
 
-    const isPDF = doc.filename.toLowerCase().endsWith('.pdf');
-    const isImage = /\.(jpg|jpeg|png|gif)$/i.test(doc.filename);
-    const fileUrl = `http://localhost:5000/view/${doc.id}?user_id=${user_id}`; // Tracked View Endpoint
+    const isPDF = currentDoc.filename.toLowerCase().endsWith('.pdf');
+    const isImage = /\.(jpg|jpeg|png|gif)$/i.test(currentDoc.filename);
+    const fileUrl = `http://localhost:5000/view/${currentDoc.id}?user_id=${user_id}`;
 
     return (
         <div style={{
@@ -73,11 +135,13 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
             }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                     <FileText color="var(--primary)" size={24} />
-                    <h2 style={{ margin: 0, fontSize: '1.2rem' }}>{doc.filename}</h2>
-                    <span style={{
-                        fontSize: '0.8rem', background: 'rgba(255,255,255,0.1)',
-                        padding: '0.2rem 0.5rem', borderRadius: '4px', color: 'var(--text-muted)'
-                    }}>{doc.category}</span>
+                    <div>
+                        <h2 style={{ margin: 0, fontSize: '1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            {currentDoc.filename}
+                            {currentDoc.version_number > 1 && <span style={{ fontSize: '0.8rem', background: 'var(--primary)', color: 'white', borderRadius: '4px', padding: '0 4px' }}>V{currentDoc.version_number}</span>}
+                        </h2>
+                        {currentDoc.status === 'Superseded' && <span style={{ color: '#f87171', fontSize: '0.8rem' }}>Superseded</span>}
+                    </div>
                 </div>
                 <div style={{ display: 'flex', gap: '1rem' }}>
                     <button onClick={handleToggleFavorite} className="btn-ghost" style={{ color: isFavorite ? '#eab308' : 'white' }}>
@@ -96,19 +160,21 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
             <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
                 {/* Left: Viewer */}
                 <div style={{ flex: 1, background: '#1e293b', position: 'relative', display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '2rem' }}>
-                    {isPDF ? (
-                        <iframe
-                            src={`${fileUrl}#toolbar=0`}
-                            title="PDF Viewer"
-                            style={{ width: '100%', height: '100%', border: 'none', borderRadius: '8px', background: 'white' }}
-                        />
-                    ) : isImage ? (
-                        <img src={fileUrl} alt="Document" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }} />
-                    ) : (
-                        <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
-                            <FileText size={64} style={{ marginBottom: '1rem', opacity: 0.5 }} />
-                            <p>Preview not available for this file type.</p>
-                        </div>
+                    {loading ? <div className="spin">Loading...</div> : (
+                        isPDF ? (
+                            <iframe
+                                src={`${fileUrl}#toolbar=0`}
+                                title="PDF Viewer"
+                                style={{ width: '100%', height: '100%', border: 'none', borderRadius: '8px', background: 'white' }}
+                            />
+                        ) : isImage ? (
+                            <img src={fileUrl} alt="Document" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }} />
+                        ) : (
+                            <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                                <FileText size={64} style={{ marginBottom: '1rem', opacity: 0.5 }} />
+                                <p>Preview not available for this file type.</p>
+                            </div>
+                        )
                     )}
                 </div>
 
@@ -139,7 +205,7 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
                                 <section style={{ marginBottom: '2rem' }}>
                                     <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Taxonomy Path</label>
                                     <div style={{ fontSize: '1rem', marginTop: '0.5rem', color: '#60a5fa' }}>
-                                        {doc.subsidiary} / {doc.department} / {doc.function}
+                                        {currentDoc.subsidiary} / {currentDoc.department} / {currentDoc.function}
                                     </div>
                                 </section>
 
@@ -147,22 +213,12 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
                                     <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Lifecycle Status</label>
                                     <div style={{ marginTop: '0.5rem' }}>
                                         <span style={{
-                                            background: doc.approval_status === 'Approved' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(234, 179, 8, 0.2)',
-                                            color: doc.approval_status === 'Approved' ? '#4ade80' : '#facc15',
+                                            background: currentDoc.approval_status === 'Approved' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(234, 179, 8, 0.2)',
+                                            color: currentDoc.approval_status === 'Approved' ? '#4ade80' : '#facc15',
                                             padding: '0.4rem 0.8rem', borderRadius: '20px', fontSize: '0.85rem'
                                         }}>
-                                            {doc.approval_status || 'Pending'}
+                                            {currentDoc.approval_status || 'Pending'}
                                         </span>
-                                        {doc.status && doc.status !== 'Published' && (
-                                            <span style={{
-                                                marginLeft: '0.5rem',
-                                                background: doc.status === 'Archived' ? 'rgba(96, 165, 250, 0.2)' : doc.status === 'Soft_Deleted' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(255,255,255,0.1)',
-                                                color: doc.status === 'Archived' ? '#60a5fa' : doc.status === 'Soft_Deleted' ? '#f87171' : 'var(--text-muted)',
-                                                padding: '0.4rem 0.8rem', borderRadius: '20px', fontSize: '0.85rem'
-                                            }}>
-                                                {doc.status.replace('_', ' ')}
-                                            </span>
-                                        )}
                                     </div>
                                 </section>
 
@@ -173,7 +229,7 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
                                         padding: '1rem', borderRadius: '8px', fontSize: '0.85rem',
                                         color: '#e2e8f0', overflowX: 'auto'
                                     }}>
-                                        {doc.metadata ? JSON.stringify(JSON.parse(doc.metadata), null, 2) : "No metadata available"}
+                                        {currentDoc.metadata ? JSON.stringify(JSON.parse(currentDoc.metadata), null, 2) : "No metadata available"}
                                     </pre>
                                 </section>
                             </div>
@@ -181,17 +237,30 @@ const DocumentViewer = ({ doc, onClose, isAdmin, user_id }) => {
 
                         {activeTab === 'versions' && (
                             <div className="animate-fade-in">
+                                <div style={{ marginBottom: '1rem' }}>
+                                    <label htmlFor="new-version-upload" className="btn" style={{ display: 'block', textAlign: 'center', background: '#3b82f6', cursor: 'pointer' }}>
+                                        {uploadingVersion ? 'Uploading...' : 'Upload New Version'}
+                                    </label>
+                                    <input
+                                        id="new-version-upload"
+                                        type="file"
+                                        style={{ display: 'none' }}
+                                        onChange={handleUploadVersion}
+                                        disabled={uploadingVersion}
+                                    />
+                                </div>
                                 {versions.length > 0 ? versions.map(v => (
-                                    <div key={v.id} style={{
-                                        padding: '1rem', background: 'rgba(255,255,255,0.03)',
-                                        borderRadius: '8px', marginBottom: '1rem', border: '1px solid var(--glass-border)'
+                                    <div key={v.id} onClick={() => handleVersionSwitch(v.id)} style={{
+                                        padding: '1rem', background: v.id === currentDoc.id ? 'rgba(59, 130, 246, 0.1)' : 'rgba(255,255,255,0.03)',
+                                        borderRadius: '8px', marginBottom: '1rem', border: v.id === currentDoc.id ? '1px solid #3b82f6' : '1px solid var(--glass-border)',
+                                        cursor: 'pointer', transition: 'all 0.2s'
                                     }}>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                                            <span style={{ fontWeight: 'bold' }}>{v.version_timestamp}</span>
-                                            <span style={{ color: 'var(--primary)', fontSize: '0.8rem' }}>{v.category}</span>
+                                            <span style={{ fontWeight: 'bold' }}>V{v.version_number} <span style={{ fontSize: '0.8rem', fontWeight: 'normal', color: 'var(--text-muted)' }}>({v.status})</span></span>
+                                            <span style={{ color: 'var(--primary)', fontSize: '0.8rem' }}>{v.upload_date ? v.upload_date.split(' ')[0] : ''}</span>
                                         </div>
-                                        <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{v.reason}</div>
-                                        <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', opacity: 0.6 }}>by {v.user_id}</div>
+                                        <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{v.filename}</div>
+                                        <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', opacity: 0.6 }}>by {v.uploader_id}</div>
                                     </div>
                                 )) : <div style={{ textAlign: 'center', color: 'var(--text-muted)', marginTop: '2rem' }}>No version history.</div>}
                             </div>

@@ -112,6 +112,12 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
 
+        # FR-32: Add confidence_reason column
+        try:
+            conn.execute("ALTER TABLE documents ADD COLUMN confidence_reason TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         # Create Index for UID
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_uid ON documents(uid)")
 
@@ -158,6 +164,20 @@ def init_db():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_content_hash ON documents(content_hash)")
         except sqlite3.OperationalError:
             pass
+
+        # Versioning & Expiry Migration
+        for col, col_type in [
+            ('parent_doc_id', 'INTEGER'), 
+            ('version_number', 'INTEGER DEFAULT 1'), 
+            ('expiry_date', 'TEXT')
+        ]:
+            try:
+                conn.execute(f'ALTER TABLE documents ADD COLUMN {col} {col_type}')
+            except sqlite3.OperationalError:
+                pass
+        
+        # Index for version lookups
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_parent ON documents(parent_doc_id)")
 
         # Performance Indices (Search Optimization)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_category ON documents(category)")
@@ -374,7 +394,12 @@ def init_db():
         # Migration: Add confidentiality_level to documents
         try:
             conn.execute("ALTER TABLE documents ADD COLUMN confidentiality_level TEXT DEFAULT 'Internal'")
-            conn.execute("ALTER TABLE documents ADD COLUMN confidentiality_level TEXT DEFAULT 'Internal'")
+        except sqlite3.OperationalError:
+            pass
+
+        # Migration: Add is_deleted for Soft Delete (FR)
+        try:
+            conn.execute("ALTER TABLE documents ADD COLUMN is_deleted INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
 
@@ -410,6 +435,10 @@ def init_db():
         conn.execute("UPDATE documents SET status = 'Published' WHERE ocr_status = 'Completed' AND status = 'Intake'")
          # Seed System Settings
         conn.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('legal_hold', 'false')")
+        
+        # Sync is_deleted for existing Soft_Deleted docs
+        conn.execute("UPDATE documents SET is_deleted = 1 WHERE status = 'Soft_Deleted'")
+        
         conn.commit()
     except sqlite3.OperationalError:
         pass
@@ -445,7 +474,7 @@ def check_duplicate_hash(file_hash):
     conn.close()
     return dict(doc) if doc else None
 
-def save_document(filename, category, confidence, content, container_id=None, batch_id=None, ocr_status='Processed', metadata=None, template_type=None, uploader_id=None, tags=None, owner_id=None, content_hash=None):
+def save_document(filename, category, confidence, content, container_id=None, batch_id=None, ocr_status='Processed', metadata=None, template_type=None, uploader_id=None, tags=None, owner_id=None, content_hash=None, confidence_reason=None, parent_doc_id=None, version_number=1, expiry_date=None, status='Processed'):
     conn = get_db_connection()
     upload_date = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     doc_uid = generate_uid()
@@ -456,9 +485,9 @@ def save_document(filename, category, confidence, content, container_id=None, ba
 
     with conn:
         cursor = conn.execute('''
-            INSERT INTO documents (filename, category, confidence, content, upload_date, container_id, batch_id, ocr_status, metadata, template_type, uploader_id, tags, uid, owner_id, confidentiality_level, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (filename, category, confidence, content, upload_date, container_id, batch_id, ocr_status, metadata, template_type, uploader_id, tags, doc_uid, owner_id, 'Internal', content_hash))
+            INSERT INTO documents (filename, category, confidence, content, upload_date, container_id, batch_id, ocr_status, metadata, template_type, uploader_id, tags, uid, owner_id, confidentiality_level, content_hash, confidence_reason, parent_doc_id, version_number, expiry_date, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (filename, category, confidence, content, upload_date, container_id, batch_id, ocr_status, metadata, template_type, uploader_id, tags, doc_uid, owner_id, 'Internal', content_hash, confidence_reason, parent_doc_id, version_number, expiry_date, status))
     doc_id = cursor.lastrowid
     
     # Increment container physical page count
@@ -511,6 +540,7 @@ def update_approval_status(doc_id, status, user, notes=None):
     if notes:
         details += f" Notes: {notes}"
     log_audit('document', doc_id, 'approval_action', details, user)
+    return True
 
 def get_approval_policies():
     conn = get_db_connection()
@@ -534,7 +564,41 @@ def check_approval_required(category, confidentiality):
 
 def get_document_versions(doc_id):
     conn = get_db_connection()
-    cursor = conn.execute('SELECT * FROM document_versions WHERE document_id = ? ORDER BY version_timestamp DESC', (doc_id,))
+    
+    # Logic: 
+    # 1. Find the root parent of the requested doc (or itself if it is root)
+    # 2. Find all docs sharing that parent (or where parent is that root)
+    
+    # First, get the current doc
+    doc = conn.execute("SELECT id, parent_doc_id, version_number FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc:
+        conn.close()
+        return []
+        
+    root_id = doc['parent_doc_id'] if doc['parent_doc_id'] else doc['id']
+    
+    # Fetch all versions: The root itself + children
+    query = """
+        SELECT id, filename, version_number, upload_date, status, uploader_id, reason, version_timestamp 
+        FROM documents 
+        WHERE id = ? OR parent_doc_id = ?
+        ORDER BY version_number DESC
+    """
+    # Note: 'reason' and 'version_timestamp' might not actully exist in 'documents' table as per my migration?
+    # Wait, I didn't add 'reason' to documents. 'document_versions' table had it.
+    # For now, let's just return what we have in documents.
+    # If we want detailed reason, we might need to join or just rely on 'ocr_status' or similar?
+    # Actually, previous implementation plan didn't explicitly ask for 'reason' column in documents, but 'document_versions' table had it.
+    # Let's fix the query to select valid columns.
+    
+    query = """
+        SELECT id, filename, version_number, upload_date, status, uploader_id, category, confidence 
+        FROM documents 
+        WHERE id = ? OR parent_doc_id = ?
+        ORDER BY version_number DESC
+    """
+    
+    cursor = conn.execute(query, (root_id, root_id))
     versions = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return versions
@@ -632,6 +696,9 @@ def get_audit_logs(filters=None):
         if filters.get('start_date'):
             query += " AND timestamp >= ?"
             params.append(filters['start_date'])
+        if filters.get('entity_id'):
+            query += " AND entity_id = ?"
+            params.append(filters['entity_id'])
         if filters.get('end_date'):
             query += " AND timestamp <= ?"
             params.append(filters['end_date'] + " 23:59:59")
@@ -697,7 +764,10 @@ def get_filtered_documents(category=None, start_date=None, end_date=None, search
     # Join with favorites to check if current user favorited it
     query = """
         SELECT d.*, c.subsidiary, c.department, c.function, c.confidentiality_level,
-               CASE WHEN fav.document_id IS NOT NULL THEN 1 ELSE 0 END as is_favorite
+               CASE WHEN fav.document_id IS NOT NULL THEN 1 ELSE 0 END as is_favorite,
+               COALESCE(c.description, d.category) as effective_category_unused,
+               CASE WHEN d.category = 'Unclassified' OR d.category IS NULL THEN COALESCE(c.name, 'Unclassified') ELSE d.category END as category,
+               c.name as container_name
         FROM documents d
         LEFT JOIN containers c ON d.container_id = c.id
         LEFT JOIN favorites fav ON d.id = fav.document_id AND fav.user_id = ?
@@ -705,6 +775,19 @@ def get_filtered_documents(category=None, start_date=None, end_date=None, search
     """
     params = [user_id]
     
+    # Exclude deleted by default unless looking for them
+    if status != 'Soft_Deleted':
+        query += " AND (d.is_deleted = 0 OR d.is_deleted IS NULL)"
+        # Default Filter: Hide Superseded versions unless explicitly asked or filtering by specific ID?
+        # If we are filtering by ID (not here usually), or if status is not specified?
+        # "In the main Document Library... only show 'Active' version"
+        if not status:
+             query += " AND (d.status != 'Superseded' OR d.status IS NULL)"
+    
+    if status == 'Superseded':
+         # If user explicitly wants superseded, we allow it (handled by param)
+         pass
+
     if batch_id:
         query += " AND d.batch_id = ?"
         params.append(batch_id)
@@ -935,6 +1018,58 @@ def get_analytics_stats():
         "daily_throughput": daily_throughput
     }
 
+def soft_delete_document(doc_id, user_id):
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE documents SET status = 'Soft_Deleted', is_deleted = 1 WHERE id = ?", (doc_id,))
+        conn.commit()
+        log_audit('document', doc_id, 'SOFT_DELETE', f"Document soft-deleted by user {user_id}", user_id)
+        return True
+    except Exception as e:
+        print(f"Error soft deleting document {doc_id}: {e}")
+        return False
+    finally:
+        conn.close()
+
+def restore_document(doc_id, user_id):
+    conn = get_db_connection()
+    try:
+        # Restore to 'Published' as requested, and reset is_deleted
+        conn.execute("UPDATE documents SET status = 'Published', is_deleted = 0, approval_status = 'Approved' WHERE id = ?", (doc_id,))
+        conn.commit()
+        log_audit('document', doc_id, 'RESTORE', f"Document restored by user {user_id}", user_id)
+        return True
+    except Exception as e:
+        print(f"Error restoring document {doc_id}: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_documents_for_workload(is_admin, only_published, status=None, category=None):
+    conn = get_db_connection()
+    if is_admin and only_published:
+        # Admin can verify "Published" specifically if needed, but usually Admin sees all.
+        pass
+        
+    query = "SELECT * FROM documents WHERE is_deleted = 0"
+    params = []
+
+    if only_published:
+        query += " AND ocr_status = 'Published'"
+    
+    if status and status != 'Published': # If status passed explicitly
+        query += " AND ocr_status = ?"
+        params.append(status)
+        
+    if category:
+        query += " AND category = ?"
+        params.append(category)
+    
+    cursor = conn.execute(query, params)
+    items = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return items
+
 # --- Taxonomy Management ---
 def get_taxonomy(category=None):
     conn = get_db_connection()
@@ -1119,3 +1254,19 @@ def publish_saved_search(search_id):
     conn.execute("UPDATE saved_searches SET is_public = 1 WHERE id = ?", (search_id,))
     conn.commit()
     conn.close()
+
+def soft_delete_document(doc_id, user_id):
+    conn = get_db_connection()
+    try:
+        # Mark as deleted
+        conn.execute("UPDATE documents SET is_deleted = 1, status = 'Soft_Deleted' WHERE id = ?", (doc_id,))
+        conn.commit()
+        
+        # Log
+        log_audit('document', doc_id, 'DELETE', "Document moved to recycle bin", user_id)
+        return True
+    except Exception as e:
+        print(f"Delete failed: {e}")
+        return False
+    finally:
+        conn.close()

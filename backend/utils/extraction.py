@@ -20,26 +20,46 @@ def extract_metadata(text, category):
 def extract_invoice_metadata(text):
     data = {}
     
-    # Simple Heuristic Regex Patterns
-    
-    # Amount (e.g., $1,234.56 or 1234.56)
-    # Looking for 'Total' or 'Amount' followed by numbers
-    amount_match = re.search(r'(?:Total|Amount|Balance|Due)[\s\:\$]*([\d,\.]+)', text, re.IGNORECASE)
-    if amount_match:
-        data['total_amount'] = amount_match.group(1)
-        
-    # Date (e.g., 01/01/2024 or 2024-01-01)
-    date_match = re.search(r'(?:Date|Due)[\s\:]*(\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4})', text, re.IGNORECASE)
+    # 1. Invoice Number
+    # Pattern: /INV[- ]?\d+/ or /Invoice #:\s*(\d+)/
+    inv_match = re.search(r'(?:INV[- ]?\d+)|(?:Invoice\s*#[:\.]?\s*([\w-]+))', text, re.IGNORECASE)
+    if inv_match:
+        # Group 1 might be None if the first part of OR matched
+        data['invoice_number'] = inv_match.group(1) if inv_match.group(1) else inv_match.group(0)
+    else:
+        # Fallback generic
+        inv_match_generic = re.search(r'Invoice\s*(?:No|Number)?[:\.]?\s*([A-Z0-9-]+)', text, re.IGNORECASE)
+        if inv_match_generic:
+            data['invoice_number'] = inv_match_generic.group(1)
+
+    # 2. Date
+    # Pattern: /\d{2}[/-]\d{2}[/-]\d{4}/ (DD-MM-YYYY or MM-DD-YYYY or similar)
+    date_match = re.search(r'(\d{2}[/-]\d{2}[/-]\d{4})', text)
     if date_match:
         data['date'] = date_match.group(1)
         
-    # Vendor (Very hard with simple regex, usually requires NER or known vendor list)
-    # Placeholder: First line or capitalized words near top?
-    # For now, let's just look for "Vendor:" or "From:"
-    vendor_match = re.search(r'(?:Vendor|From|Bill To)[\s\:]*([A-Za-z0-9\s,]+)', text, re.IGNORECASE)
-    if vendor_match:
-        data['vendor'] = vendor_match.group(1).split('\n')[0].strip()
+    # 3. Total Amount
+    amount_match = re.search(r'(?:Total|Amount|Balance|Due)[\s\:\$]*([\d,\.]+)', text, re.IGNORECASE)
+    if amount_match:
+        data['total_amount'] = amount_match.group(1)
+
+    # 4. Contextual Parsing for Companies
+    # "Bill To:" -> Addressed Company
+    bill_to_match = re.search(r'(?:Bill|Ship)\s*To[:\.]?\s*([^\n]+)', text, re.IGNORECASE)
+    if bill_to_match:
+        data['addressed_company'] = bill_to_match.group(1).strip()
         
+    # "From:" -> Issuing Company
+    # Often the issuing company is at the very top or explicitly "From:"
+    from_match = re.search(r'(?:From|Vendor)[:\.]?\s*([^\n]+)', text, re.IGNORECASE)
+    if from_match:
+        data['issuing_company'] = from_match.group(1).strip()
+    else:
+        # Fallback: First non-empty line usually Issuing Company in headers
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        if lines:
+            data['issuing_company'] = lines[0] # Naive assumption, but standard for headers
+            
     return data
 
 def extract_contract_metadata(text):

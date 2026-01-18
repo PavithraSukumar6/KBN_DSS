@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Trash2, RefreshCw, AlertTriangle, FileText, CheckCircle, Package } from 'lucide-react';
 
-const CleanupReviews = ({ currentUser }) => {
+const CleanupReviews = ({ currentUser, onRefresh }) => {
     const [deletedDocs, setDeletedDocs] = useState([]);
     const [deletedContainers, setDeletedContainers] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -42,7 +42,8 @@ const CleanupReviews = ({ currentUser }) => {
         try {
             await axios.post(`http://localhost:5000/documents/${docId}/restore?user_id=${currentUser?.id}`);
             setMessage({ type: 'success', text: 'Document restored successfully' });
-            fetchDeletedDocs();
+            if (onRefresh) onRefresh(); // Trigger global refresh (Dashboard)
+            fetchDeletedDocs(); // Refresh local list
         } catch (err) {
             setMessage({ type: 'error', text: err.response?.data?.error || 'Restore failed' });
         }

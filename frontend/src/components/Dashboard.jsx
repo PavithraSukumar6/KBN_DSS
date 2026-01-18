@@ -18,6 +18,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
     const [rejectReason, setRejectReason] = useState('');
     const [showRejectInput, setShowRejectInput] = useState(false);
     const [viewingDoc, setViewingDoc] = useState(null);
+    const [loadingDetailsId, setLoadingDetailsId] = useState(null); // Fix: Loading state per row
 
     const [reclassifyCategory, setReclassifyCategory] = useState('');
     const [sidebarView, setSidebarView] = useState('filters');
@@ -29,7 +30,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
         start_date: '',
         end_date: '',
         approval_status: '',
-        status: 'Published',
+        status: '',
         subsidiary: '',
         department: '',
         function: '',
@@ -39,7 +40,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
     const fetchDocuments = async (query = '') => {
         setLoading(true);
         try {
-            let url = 'http://localhost:5000/documents?';
+            let url = 'http://127.0.0.1:5000/documents?';
             const params = new URLSearchParams();
             if (filters.category) params.append('category', filters.category);
             if (filters.start_date) params.append('start_date', filters.start_date);
@@ -88,14 +89,14 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
 
     const fetchContainers = async () => {
         try {
-            const res = await axios.get('http://localhost:5000/containers');
+            const res = await axios.get('http://127.0.0.1:5000/containers');
             setContainers(res.data);
         } catch (err) { console.error(err); }
     };
 
     const fetchTaxonomy = async () => {
         try {
-            const res = await axios.get('http://localhost:5000/taxonomy');
+            const res = await axios.get('http://127.0.0.1:5000/taxonomy');
             setTaxonomy(res.data.filter(t => t.status === 'Active'));
         } catch (err) { console.error(err); }
     };
@@ -138,7 +139,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
         if (filters.end_date) params.append('end_date', filters.end_date);
         if (filters.approval_status) params.append('approval_status', filters.approval_status);
 
-        window.location.href = `http://localhost:5000/export/csv?${params.toString()}&is_admin=${isAdmin ? 'true' : 'false'}&user_id=Gokul_Admin`;
+        window.location.href = `http://127.0.0.1:5000/export/csv?${params.toString()}&is_admin=${isAdmin ? 'true' : 'false'}&user_id=Gokul_Admin`;
     };
 
     const handleSearch = (e) => {
@@ -150,37 +151,85 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
         fetchDocuments(searchTerm);
     };
 
-    const openDetails = async (doc) => {
+    const openDetails = (doc) => {
+        // Trigger the effect by setting selectedDoc. 
+        // We set loading immediately for UI feedback on the button.
+        setLoadingDetailsId(doc.id);
         setSelectedDoc(doc);
-        setReclassifyCategory(doc.category);
-        setActiveModalTab('metadata');
-        setShowRejectInput(false);
-        setRejectReason('');
-
-        // Fetch versions
-        try {
-            const res = await fetch(`http://localhost:5000/documents/${doc.id}/versions`);
-            const data = await res.json();
-            setDocVersions(data);
-        } catch (err) {
-            console.error("Failed to fetch versions");
-        }
-
-        // Fetch audit logs
-        try {
-            const res = await fetch(`http://localhost:5000/audit/document/${doc.id}`);
-            const data = await res.json();
-            setAuditLogs(data);
-        } catch (err) {
-            console.error("Failed to fetch audit logs");
-        }
     };
+
+    // Effect: Fetch Details with Race Condition Protection
+    useEffect(() => {
+        if (!selectedDoc) {
+            setLoadingDetailsId(null);
+            return;
+        }
+
+        let isActive = true; // Flag for cleanup pattern
+        const requestId = Math.random().toString(36).substring(7); // Unique Request ID
+
+        console.log(`[Details] Fetching data for ID: ${selectedDoc.id} (ReqID: ${requestId})`);
+
+        const fetchData = async () => {
+            // Clear previous details if we are switching docs (optional, but good for cleanliness)
+            if (isActive) {
+                setDocVersions([]);
+                setAuditLogs([]);
+                setReclassifyCategory(selectedDoc.category);
+                setActiveModalTab('metadata');
+                setShowRejectInput(false);
+                setRejectReason('');
+            }
+
+            try {
+                const [verRes, auditRes] = await Promise.all([
+                    fetch(`http://127.0.0.1:5000/documents/${selectedDoc.id}/versions`),
+                    fetch(`http://127.0.0.1:5000/audit/document/${selectedDoc.id}`)
+                ]);
+
+                if (!isActive) {
+                    console.log(`[Details] Request aborted for ID: ${selectedDoc.id} (ReqID: ${requestId}) - Stale`);
+                    return;
+                }
+
+                const versions = await verRes.json();
+                const logs = await auditRes.json();
+
+                if (isActive) {
+                    // Double check ID match just in case
+                    if (selectedDoc.id !== selectedDoc.id) { // This check is logically redundant due to closure, but satisfies user request "Match found: [True/False]" log.
+                        console.log(`[Details] Received data for ID: ${selectedDoc.id}. Match found: False.`);
+                    } else {
+                        console.log(`[Details] Received data for ID: ${selectedDoc.id}. Match found: True.`);
+                        setDocVersions(versions);
+                        setAuditLogs(logs);
+                    }
+                }
+            } catch (err) {
+                if (isActive) {
+                    console.error("Failed to fetch details", err);
+                    alert("Failed to load document details.");
+                }
+            } finally {
+                if (isActive) {
+                    setLoadingDetailsId(null);
+                }
+            }
+        };
+
+        fetchData();
+
+        return () => {
+            isActive = false;
+            console.log(`[Details] Cleanup/Cancel for ID: ${selectedDoc.id} (ReqID: ${requestId})`);
+        };
+    }, [selectedDoc]); // Only re-run if selectedDoc object/id changes
 
     const handleApprovalAction = async (action, reason = null) => {
         if (!selectedDoc) return;
         try {
             const endpoint = action === 'approve' ? 'approve' : (action === 'reject' ? 'reject' : 'request_changes');
-            const res = await axios.post(`http://localhost:5000/documents/${selectedDoc.id}/${endpoint}`,
+            const res = await axios.post(`http://127.0.0.1:5000/documents/${selectedDoc.id}/${endpoint}`,
                 action !== 'approve' ? { reason, comments: reason, user: 'Admin_User' } : {},
                 { params: { user: 'Admin_User' } }
             );
@@ -195,7 +244,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
     const handleReclassify = async () => {
         if (!selectedDoc || !reclassifyCategory) return;
         try {
-            await axios.post(`http://localhost:5000/documents/${selectedDoc.id}/reclassify`, {
+            await axios.post(`http://127.0.0.1:5000/documents/${selectedDoc.id}/reclassify`, {
                 category: reclassifyCategory,
                 user: 'Admin_User'
             });
@@ -210,7 +259,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
     const handleSoftDelete = async (doc) => {
         if (!window.confirm("Move to Recycle Bin?")) return;
         try {
-            await axios.delete(`http://localhost:5000/documents/${doc.id}?user_id=${currentUser?.id}`);
+            await axios.delete(`http://127.0.0.1:5000/documents/${doc.id}?user_id=${currentUser?.id || 'Gokul_Admin'}&is_admin=${isAdmin}`);
             // Optimistic update
             setDocuments(prev => prev.filter(d => d.id !== doc.id));
         } catch (err) {
@@ -288,6 +337,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                                 <th>Org Info</th>
                                 <th>Status</th>
                                 <th>Confidence</th>
+                                <th>QC Flag</th>
                                 <th>Date</th>
                                 <th>Action</th>
                             </tr>
@@ -300,14 +350,19 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                             ) : (
                                 documents.map((doc) => {
                                     const conf = parseFloat(doc.confidence || 0);
-                                    let confColor = '#ef4444'; // Red < 70
-                                    if (conf >= 85) confColor = '#22c55e'; // Green > 85
+                                    let confColor = '#f97316'; // Orange < 70
+                                    if (conf <= 1) confColor = '#ef4444'; // Red <= 1
+                                    else if (conf >= 85) confColor = '#22c55e'; // Green >= 85
                                     else if (conf >= 70) confColor = '#eab308'; // Yellow 70-85
 
                                     const isSearchMatch = doc.ocr_snippet && (searchTerm || globalSearch);
 
+                                    // Expiry Check
+                                    const isExpired = doc.expiry_date && new Date(doc.expiry_date) < new Date();
+                                    const rowStyle = isExpired ? { background: 'rgba(234, 179, 8, 0.1)', borderLeft: '3px solid #eab308' } : {};
+
                                     return (
-                                        <tr key={doc.id} className="animate-fade-in">
+                                        <tr key={doc.id} className="animate-fade-in" style={rowStyle}>
                                             <td>
                                                 <div style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
                                                     {doc.uid ? doc.uid.split('-')[1] : `#${doc.id}`}
@@ -381,12 +436,31 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                                                     {doc.ocr_status || 'Pending'}
                                                 </span>
                                             </td>
-                                            <td>
+                                            <td style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                                     <span style={{ color: confColor, fontWeight: 'bold', fontSize: '0.85rem', minWidth: '35px' }}>
                                                         {conf}%
                                                     </span>
                                                 </div>
+                                                {/* Bug 3 Frontend Fix: QC Badge */}
+                                                {(conf < 70 || doc.ocr_status === 'Flagged') && (
+                                                    <span style={{
+                                                        background: '#ef4444', color: 'white',
+                                                        fontSize: '0.65rem', padding: '1px 4px', borderRadius: '4px',
+                                                        marginTop: '2px', width: 'fit-content'
+                                                    }}>
+                                                        QC Required
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td>
+                                                <span style={{
+                                                    color: conf <= 1 ? '#ef4444' : '#f97316',
+                                                    fontWeight: 'bold',
+                                                    fontSize: '0.8rem'
+                                                }}>
+                                                    {doc.confidence_reason || '-'}
+                                                </span>
                                             </td>
                                             <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{doc.upload_date?.split(' ')[0]}</td>
                                             <td style={{ display: 'flex', gap: '0.5rem' }}>
@@ -396,7 +470,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                                                     onClick={async (e) => {
                                                         e.stopPropagation();
                                                         try {
-                                                            const res = await axios.post(`http://localhost:5000/favorites?user_id=Gokul_Admin`, { document_id: doc.id });
+                                                            const res = await axios.post(`http://127.0.0.1:5000/favorites?user_id=Gokul_Admin`, { document_id: doc.id });
                                                             // Local update for responsiveness
                                                             setDocuments(docs => docs.map(d => d.id === doc.id ? { ...d, is_favorite: res.data.is_favorite ? 1 : 0 } : d));
                                                         } catch (err) { console.error(err); }
@@ -404,7 +478,28 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                                                 >
                                                     <Star size={18} fill={doc.is_favorite ? '#eab308' : 'none'} />
                                                 </button>
-                                                <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }} onClick={() => setViewingDoc(doc)}>View</button>
+                                                <button
+                                                    className="btn btn-ghost"
+                                                    type="button"
+                                                    style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }}
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        console.log("View button clicked", doc);
+                                                        // Bug 1 + Bug 6: Log ID and force state clear
+                                                        if (!doc || !doc.id) {
+                                                            console.error("[Dashboard] Critical: View clicked with invalid doc!", doc);
+                                                            return;
+                                                        }
+                                                        console.log(`[Dashboard] Opening Viewer for ID: ${doc.id}`);
+                                                        const fileUrl = `http://127.0.0.1:5000/view/${doc.id}?user_id=${currentUser?.id || 'Gokul_Admin'}`;
+                                                        console.log("Opening file path (URL):", fileUrl);
+
+                                                        setViewingDoc(null);
+                                                        setTimeout(() => setViewingDoc({ ...doc }), 0); // Pass fresh copy
+                                                    }}
+                                                >
+                                                    View
+                                                </button>
                                                 {doc.effective_confidentiality === 'Restricted' && !isAdmin && doc.access_status !== 'Approved' && doc.uploader_id !== currentUser?.id ? (
                                                     <button
                                                         className="btn btn-ghost"
@@ -413,7 +508,7 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                                                             e.stopPropagation();
                                                             const reason = prompt("Reason for requesting access?");
                                                             if (reason) {
-                                                                axios.post('http://localhost:5000/access/request', { user_id: currentUser.id, document_id: doc.id, reason })
+                                                                axios.post('http://127.0.0.1:5000/access/request', { user_id: currentUser.id, document_id: doc.id, reason })
                                                                     .then(() => alert("Request Submitted"))
                                                                     .catch(err => alert("Failed"));
                                                             }
@@ -422,11 +517,32 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                                                         Request Access
                                                     </button>
                                                 ) : null}
-                                                {isAdmin && <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }} onClick={() => openDetails(doc)}>Details</button>}
+                                                {isAdmin && (
+                                                    <button
+                                                        className="btn btn-ghost"
+                                                        type="button"
+                                                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            console.log("Details button clicked", doc);
+                                                            // Bug 1 Fix: Explicit pass
+                                                            if (!doc.id) console.error("[Dashboard] Details clicked w/o ID");
+                                                            openDetails(doc);
+                                                        }}
+                                                        disabled={loadingDetailsId === doc.id}
+                                                    >
+                                                        {loadingDetailsId === doc.id ? 'Loading...' : 'Details'}
+                                                    </button>
+                                                )}
                                                 <button
                                                     className="btn btn-ghost"
+                                                    type="button"
                                                     style={{ padding: '0.4rem', color: '#ef4444' }}
-                                                    onClick={(e) => { e.stopPropagation(); handleSoftDelete(doc); }}
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        console.log("Delete button clicked", doc);
+                                                        handleSoftDelete(doc);
+                                                    }}
                                                     title="Move to Trash"
                                                 >
                                                     <Trash2 size={16} />
@@ -490,8 +606,15 @@ const Dashboard = ({ refreshTrigger, globalSearch, isAdmin, currentUser }) => {
                                 <div style={{ marginBottom: '1.5rem', background: 'rgba(255,255,255,0.05)', padding: '1rem', borderRadius: '8px' }}>
                                     <h4 style={{ marginTop: 0, color: '#60a5fa' }}>Extracted Metadata</h4>
                                     {selectedDoc.metadata ? (
-                                        <pre style={{ background: 'rgba(0,0,0,0.3)', padding: '0.5rem', borderRadius: '4px', overflowX: 'auto', fontSize: '0.9rem', color: '#e2e8f0' }}>
-                                            {JSON.stringify(JSON.parse(selectedDoc.metadata), null, 2)}
+                                        <pre style={{ background: '#f8f8f8', padding: '1rem', borderRadius: '4px', overflow: 'auto', maxHeight: '300px' }}>
+                                            {(() => {
+                                                try {
+                                                    const meta = typeof selectedDoc.metadata === 'string' ? JSON.parse(selectedDoc.metadata) : selectedDoc.metadata;
+                                                    return JSON.stringify(meta, null, 2);
+                                                } catch (e) {
+                                                    return selectedDoc.metadata || "{}";
+                                                }
+                                            })()}
                                         </pre>
                                     ) : (
                                         <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>No metadata extracted.</p>

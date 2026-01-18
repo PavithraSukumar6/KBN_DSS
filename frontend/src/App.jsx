@@ -11,7 +11,8 @@ import AuditCenter from './components/AuditCenter';
 import CleanupReviews from './components/CleanupReviews';
 import WorkloadManager from './components/WorkloadManager';
 import Login from './components/Login';
-import { LayoutDashboard, Box, ScanLine, Microscope, BarChart3, Shield, User, UserCheck, Activity, Trash2, Briefcase, LogOut } from 'lucide-react';
+import CloudManager from './components/CloudManager';
+import { LayoutDashboard, Box, ScanLine, Microscope, BarChart3, Shield, User, UserCheck, Activity, Trash2, Briefcase, LogOut, Cloud } from 'lucide-react';
 
 function App() {
     const [refreshKey, setRefreshKey] = useState(0);
@@ -220,6 +221,14 @@ function App() {
                         <Trash2 size={20} /> Cleanup
                     </button>
                 )}
+
+                <button
+                    onClick={() => setActiveTab('cloud')}
+                    className={`btn ${activeTab === 'cloud' ? '' : 'btn-ghost'} `}
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: activeTab === 'cloud' ? '#3b82f6' : 'transparent' }}
+                >
+                    <Cloud size={20} /> Cloud Manager
+                </button>
             </div>
 
             <main>
@@ -239,7 +248,9 @@ function App() {
                 ) : activeTab === 'audit' ? (
                     <AuditCenter currentUser={currentUser} />
                 ) : activeTab === 'cleanup' ? (
-                    <CleanupReviews currentUser={currentUser} />
+                    <CleanupReviews currentUser={currentUser} onRefresh={() => setRefreshKey(prev => prev + 1)} />
+                ) : activeTab === 'cloud' ? (
+                    <CloudManager />
                 ) : (
                     <>
                         {/* Only show upload pipeline if authorized? Prompt says Op/Intern see QC/Intake. 
@@ -261,7 +272,7 @@ function App() {
             }}>
                 <p>Built with Flask + React • 2024</p>
             </footer>
-        </div>
+        </div >
     );
 }
 

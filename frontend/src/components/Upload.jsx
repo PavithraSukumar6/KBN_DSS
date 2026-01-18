@@ -22,7 +22,7 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
     useEffect(() => {
         const fetchTaxonomy = async () => {
             try {
-                const res = await axios.get('http://localhost:5000/taxonomy');
+                const res = await axios.get('http://127.0.0.1:5000/taxonomy');
                 setTaxonomy(res.data.filter(t => t.status === 'Active'));
             } catch (err) { console.error(err); }
         };
@@ -31,7 +31,7 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
         if (!containerId) {
             const fetchContainers = async () => {
                 try {
-                    const res = await axios.get('http://localhost:5000/containers');
+                    const res = await axios.get('http://127.0.0.1:5000/containers');
                     setContainers(res.data);
                 } catch (error) { console.error("Failed to load containers"); }
             };
@@ -89,7 +89,7 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
         }
 
         try {
-            const response = await axios.post('http://localhost:5000/upload', formData, {
+            const response = await axios.post('http://127.0.0.1:5000/upload', formData, {
                 headers: { 'Content-Type': 'multipart/form-data' },
                 onUploadProgress: (progressEvent) => {
                     const progress = progressEvent.total
@@ -103,7 +103,8 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
             let errorMsg = error.response?.data?.error || 'Upload failed';
             if (error.response?.status === 409 && error.response?.data?.existing_doc) {
                 const exist = error.response.data.existing_doc;
-                errorMsg = `Duplicate of: ${exist.filename} (Uploaded by ${exist.uploader})`;
+                errorMsg = `Duplicate: ${exist.filename} (Uploaded by ${exist.uploader})`;
+                return { status: 'duplicate', error: errorMsg };
             }
             return { status: 'error', error: errorMsg };
         }
@@ -135,18 +136,27 @@ const Upload = ({ onUploadSuccess, batchId = null, containerId = null }) => {
                     if (result.result.suggestions.category) setDocType(result.result.suggestions.category);
                     if (result.result.suggestions.department) setSelectedDepartment(result.result.suggestions.department);
                 }
+            } else if (result.status === 'duplicate') {
+                errorCount++;
+                // Special handling for duplicate to ensure it's red/warning
+                // We'll treat it as error state but maybe different icon in future
             } else {
                 errorCount++;
             }
 
-            setFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: result.status, result: result.result, error: result.error } : f));
+            setFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: result.status === 'duplicate' ? 'error' : result.status, result: result.result, error: result.error } : f));
         }
 
         if (successCount > 0 && errorCount === 0) {
             setMessage({ type: 'success', text: `Successfully uploaded ${successCount} files.` });
             if (onUploadSuccess) onUploadSuccess();
         } else if (errorCount > 0) {
-            setMessage({ type: 'error', text: `Finished with ${errorCount} errors. Please review.` });
+            // Check if any were duplicates to show specific message
+            const hasDuplicates = files.some(f => f.error && f.error.startsWith('Duplicate'));
+            // Note: 'files' state in this loop might not be fully updated immediately available for `some` check on latest status because of closure
+            // But we can check the loop result manually if we tracked it, but let's stick to simple "Duplicate File Detected" if appropriate.
+            // Actually, we can just change the generic error message to be more helpful.
+            setMessage({ type: 'error', text: `Finished with errors. ${successCount > 0 ? `(${successCount} uploaded)` : ''} Duplicate or failed files detected.` });
         }
 
         setIsUploading(false);

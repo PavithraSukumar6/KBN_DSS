@@ -1,13 +1,34 @@
-﻿import os
+﻿import fitz  # PyMuPDF
+import os
 
 def split_pdf(file_path, output_dir):
     """
-    Placeholder for splitting logic. 
-    In a real implementation, this would use PyPDF2 or pdf2image.
-    For now, it just returns the original file as a single 'split' part.
+    Converts a PDF file into individual image files (one per page).
+    Returns a list of file paths to the generated images.
     """
-    # TODO: Implement actual splitting logic
-    return [file_path]
+    try:
+        doc = fitz.open(file_path)
+        output_files = []
+        
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        
+        for i in range(len(doc)):
+            page = doc.load_page(i)
+            # Zoom = 2.0 -> 144 DPI (approx) good for OCR
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+            
+            output_filename = f"{base_name}_page_{i+1}.png"
+            output_path = os.path.join(output_dir, output_filename)
+            
+            pix.save(output_path)
+            output_files.append(output_path)
+            
+        doc.close()
+        return output_files
+        
+    except Exception as e:
+        print(f"Error splitting PDF {file_path}: {e}")
+        return []
 
 def detect_separators(file_path):
     """

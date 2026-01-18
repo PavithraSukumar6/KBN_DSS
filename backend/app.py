@@ -21,6 +21,9 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 import random
 import uuid
+from utils.cloud_manager import CloudManager
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # Direct Scan Support
 try:
@@ -40,6 +43,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['PROCESSED_FOLDER'] = PROCESSED_FOLDER
 
 # Initialize Database
 init_db()
@@ -113,9 +117,55 @@ def upload_file():
     container_id = request.form.get('container_id') # Get container ID
     batch_id = request.form.get('batch_id') # Get Batch ID if part of a batch
     tags = request.form.get('tags') # New: Tags
-    uploader_id = request.form.get('uploader_id', 'Gokul_Admin')
+    tags = request.form.get('tags') # New: Tags
+    # Bug 4 Fix: Don't default to hardcoded admin if possible, or use 'System'
+    uploader_id = request.form.get('uploader_id', 'System')
+    # Default confidentiality for now
     # Default confidentiality for now
     confidentiality = request.form.get('confidentiality_level', 'Internal')
+    
+    # Versioning
+    parent_doc_id = request.form.get('parent_doc_id')
+    expiry_date = request.form.get('expiry_date') # YYYY-MM-DD
+    
+    # Validation for version upload
+    version_number = 1
+    if parent_doc_id:
+        from database.db import get_filtered_documents
+        conn = get_db_connection()
+        # Get parent/latest version info
+        # We need to find the latest version of this family to get the next number
+        # Logic: If parent_doc_id is passed, it might be the ID of the *previous* version.
+        # We need to find the actual root or just check this doc's version?
+        # Let's assume parent_doc_id passed is the ID of the document we are versioning ON TOP of.
+        # But for data consistency, all versions should point to the SAME root (Original V1).
+        # Or, we chain them? "parent_doc_id" usually means Root.
+        # Let's check the doc passed.
+        prev_doc = conn.execute("SELECT id, parent_doc_id, version_number FROM documents WHERE id = ?", (parent_doc_id,)).fetchone()
+        
+        if prev_doc:
+            # If prev_doc has a parent, that is the root. If not, prev_doc IS the root.
+            root_id = prev_doc['parent_doc_id'] if prev_doc['parent_doc_id'] else prev_doc['id']
+            
+            # Determine next version number
+            # Get max version of this root
+            max_ver_row = conn.execute("SELECT MAX(version_number) as max_v FROM documents WHERE id = ? OR parent_doc_id = ?", (root_id, root_id)).fetchone()
+            next_ver = (max_ver_row['max_v'] or 1) + 1
+            version_number = next_ver
+            
+            # Mark the previous active one as Superseded
+            # Which one is active? Usually the one with highest version, or just the one we are replacing?
+            # Let's supersed ALL previous active ones for this root to be safe
+            conn.execute("UPDATE documents SET status = 'Superseded' WHERE (id = ? OR parent_doc_id = ?) AND status != 'Superseded' AND (is_deleted IS NULL OR is_deleted = 0)", (root_id, root_id))
+            conn.commit()
+            
+            # Update parent_doc_id to be the ROOT
+            parent_doc_id = root_id 
+        else:
+            # Prev doc not found? Fallback to normal upload
+            parent_doc_id = None
+            
+        conn.close()
 
     # Get manual metadata overrides
     category = request.form.get('category')
@@ -129,7 +179,9 @@ def upload_file():
         return jsonify({"error": "No selected file"}), 400
     
     if file:
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+        # Fix: Use unique filename to prevent collisions and wrong file serving
+        unique_name = f"{uuid.uuid4().hex[:8]}_{file.filename}"
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
         file.save(filepath)
         
         if file.filename.lower().endswith('.pdf'):
@@ -165,7 +217,11 @@ def upload_file():
                     uploader_id=uploader_id,
                     tags=tags,
                     metadata=meta_json,
-                    content_hash=file_hash
+                    content_hash=file_hash,
+                    parent_doc_id=parent_doc_id,
+                    version_number=version_number,
+                    expiry_date=expiry_date,
+                    status='Published' if parent_doc_id else 'Processed' # New versions auto-published
                 )
                 
                 # Fast Track: Auto-Publish
@@ -344,11 +400,44 @@ def view_document_route(doc_id):
         log_audit('document', doc_id, 'VIEW', f"Document viewed by {user_id}", user_id, ip_address=request.remote_addr)
     
     # Determine path (Uploads or Processed)
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filename'])
-    if not os.path.exists(file_path):
-        file_path = os.path.join(app.config['PROCESSED_FOLDER'], doc['filename'])
-        if not os.path.exists(file_path):
-            return jsonify({"error": "File not found on disk"}), 404
+    # Check multiple locations to be robust against CWD differences
+    possible_roots = [
+        app.config['UPLOAD_FOLDER'],
+        os.path.join(app.config['UPLOAD_FOLDER'], '..', 'processed_docs'), # If processed is parallel
+        app.config['PROCESSED_FOLDER'],
+        os.path.join(os.getcwd(), 'uploads'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'uploads')
+    ]
+    
+    file_path = None
+    for root in possible_roots:
+        if not root: continue
+        p = os.path.join(root, doc['filename'])
+        if os.path.exists(p):
+            file_path = p
+            break
+            
+    if not file_path:
+        # Fallback: Check backend/uploads explicitly using __file__
+        backend_root = os.path.dirname(os.path.abspath(__file__))
+        roots_to_add = [
+            os.path.join(backend_root, 'uploads'), 
+            os.path.join(backend_root, 'processed_docs'),
+            os.path.join(os.getcwd(), 'backend', 'uploads')
+        ]
+        for root in roots_to_add:
+             if not root: continue
+             p = os.path.join(root, doc['filename'])
+             if os.path.exists(p):
+                 file_path = p
+                 break
+
+    if not file_path:
+        # Log the failure for debugging
+        checked = [os.path.join(r, doc['filename']) for r in possible_roots if r] + [os.path.join(r, doc['filename']) for r in roots_to_add]
+        # app.logger.error(f"DEBUG: File not found for doc {doc_id} ({doc['filename']}). Checked: {checked}")
+        return jsonify({"error": "File not found on disk", "checked_paths": checked}), 404
             
     return send_file(file_path)
 
@@ -372,25 +461,34 @@ def process_document_background(doc_id, filepath):
                     pass
 
         # 1. OCR
-        text, confidence = extract_text(filepath)
+        text, confidence, confidence_reason = extract_text(filepath)
+        # 1. OCR
+        text, confidence, confidence_reason = extract_text(filepath)
         
         # Validation & Fallback
         if not text or len(text.strip()) < 10 or text == "OCR_SKIPPED":
              # Fallback: Try to classify by filename
-            from utils.classification import suggest_metadata_from_all
+            # from utils.classification import suggest_metadata_from_all # REMOVED: Use global
             suggestions = suggest_metadata_from_all(os.path.basename(filepath))
             
             fallback_category = suggestions.get('category')
             
+            # IMPROVEMENT: If manual category exists, we don't fail, we just succeed with no OCR content
+            if manual_category:
+                # Success via Manual Override
+                category = manual_category
+                # Metadata
+                meta_json = json.dumps(manual_metadata) if manual_metadata else "{}"
+                
+                update_document_status(doc_id, "Completed (No OCR)", "Content parsing skipped (OCR missing).", 1.0, category, meta_json, category + " Template")
+                return
+
             if fallback_category:
                 # Success via Fallback
-                category = manual_category if manual_category else fallback_category
+                category = fallback_category
                 
                 # We save with a specific status indicating no OCR was done
                 ocr_status_label = "Completed (No OCR)"
-                
-                # Still try to extract metadata if any (from filename? logic is mostly text based but let's see)
-                # suggest_metadata_from_all also returns other suggestions
                 
                 # Construct metadata from suggestions
                 meta_json = json.dumps(suggestions)
@@ -400,14 +498,27 @@ def process_document_background(doc_id, filepath):
                 return
             else:
                 # Failed and no fallback found
-                target_cat = manual_category if manual_category else "Unclassified"
+                target_cat = "Unclassified"
                 update_document_status(doc_id, "Failed", "No text detected and filename insufficient.", 0.0, target_cat)
                 return
 
         # 2. Classification
-        classified_cat, _ = classify_document(text)
-        category = manual_category if manual_category else classified_cat
+        classified_cat, classified_conf = classify_document(text)
         
+        # IMPROVEMENT: Priority Logic
+        if manual_category:
+            category = manual_category
+            final_confidence = 1.0 # High confidence because user said so
+        else:
+            category = classified_cat
+            # Map "High"/"Medium"/"Low" to float?
+            # heuristic: High=0.9, Medium=0.7, Low=0.4? 
+            # Or just use the OCR confidence? 
+            # Existing code used 'confidence' (from OCR)
+            # Let's use OCR confidence but boosted if Classification matches something?
+            # For now, stick to OCR confidence unless it's very low?
+            final_confidence = confidence
+
         # 3. Extraction
         from utils.extraction import extract_metadata
         extracted_metadata = extract_metadata(text, category)
@@ -427,14 +538,22 @@ def process_document_background(doc_id, filepath):
         final_metadata = extracted_metadata.copy()
         final_metadata.update(manual_metadata)
         metadata_json = json.dumps(final_metadata)
-        
-        # 4. Suggestions (Refined)
+
+        # 4. Auto-Renaming & Routing (Moved After Extraction)
+        from utils.renaming import process_rename_and_move
+        # Pass final_metadata for intelligent naming
+        new_path = process_rename_and_move(doc_id, filepath, category, app.config['UPLOAD_FOLDER'], final_metadata)
+        if new_path:
+            filepath = new_path
+            print(f"Auto-Renamed and Moved to: {filepath}")
+
+        # 5. Suggestions (Refined)
         final_suggestions = suggest_metadata_from_all(os.path.basename(filepath), text)
         
-        # 5. Update DB with success
-        update_document_status(doc_id, "Completed", text, confidence, category, metadata_json, category + " Template")
+        # 6. Update DB with success
+        update_document_status(doc_id, "Completed", text, final_confidence, category, metadata_json, category + " Template", confidence_reason)
         
-        # 6. Auto-Routing Logic (FR-24)
+        # 7. Legacy Auto-Routing Logic (FR-24) - Keeps container routing
         routing_keywords = {
             'HR': 'DEPT-HR',
             'HUMAN RESOURCES': 'DEPT-HR',
@@ -479,11 +598,11 @@ def process_document_background(doc_id, filepath):
         needs_approval = check_approval_required(category, confidentiality)
         
         if needs_approval:
-            update_document_status(doc_id, "Completed", text, confidence, category, metadata_json, category + " Template")
+            update_document_status(doc_id, "Completed", text, final_confidence, category, metadata_json, category + " Template")
             update_approval_status(doc_id, "Pending Approval", "System")
         
         # FR-32: Fast-Track QC Logic
-        elif confidence > 90 and risk == "Low":
+        elif final_confidence > 90 and risk == "Low":
             # High confidence + Low Risk -> QC Passed automatically
             # We still mark as 'Completed' but maybe we can introduce 'QC_Passed'
             # Let's say 'QC_Passed' is a status or we just skip QC queue.
@@ -492,8 +611,8 @@ def process_document_background(doc_id, filepath):
             # If we want to skip legacy QC for these, update `ocr_status` to 'QC_Passed' or 'Published'?
             # The prompt says "set status to 'QC_Passed'".
             
-            update_document_status(doc_id, "QC_Passed", text, confidence, category, metadata_json, category + " Template")
-            log_audit('document', doc_id, 'auto-qc', f"Auto-passed QC (Conf: {confidence}%)", "System")
+            update_document_status(doc_id, "QC_Passed", text, final_confidence, category, metadata_json, category + " Template", confidence_reason)
+            log_audit('document', doc_id, 'auto-qc', f"Auto-passed QC (Conf: {final_confidence}%)", "System")
             
             # Auto-publish if really confident? Request says "QC_Passed". 
             # If 'QC_Passed' means ready for export, that's good.
@@ -501,14 +620,14 @@ def process_document_background(doc_id, filepath):
             # Rigorous QC Required
             # Mark as 'Rigorous_QC' or just standard 'Completed' (which means Pending QC in new flow?)
             # Let's mark as 'Rigorous_QC' to be explicit in the UI badges.
-            update_document_status(doc_id, "Rigorous_QC", text, confidence, category, metadata_json, category + " Template")
+            update_document_status(doc_id, "Rigorous_QC", text, final_confidence, category, metadata_json, category + " Template", confidence_reason)
         
     except Exception as e:
         print(f"Background Job Failed for Doc {doc_id}: {e}")
         # update_document_status will need to handle strict args, maybe pass Nones
         update_document_status(doc_id, "Failed", f"Error: {str(e)}", 0.0, "Unclassified", "{}", None)
 
-def update_document_status(doc_id, status, content, confidence, category, metadata=None, template_type=None):
+def update_document_status(doc_id, status, content, confidence, category, metadata=None, template_type=None, confidence_reason=None):
     from database.db import validate_metadata, log_audit
     
     # FR-15: Validation
@@ -530,9 +649,9 @@ def update_document_status(doc_id, status, content, confidence, category, metada
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE documents 
-            SET ocr_status = ?, content = ?, confidence = ?, category = ?, metadata = ?, template_type = ?
+            SET ocr_status = ?, content = ?, confidence = ?, category = ?, metadata = ?, template_type = ?, confidence_reason = ?
             WHERE id = ?
-        ''', (status, content, confidence, category, metadata, template_type, doc_id))
+        ''', (status, content, confidence, category, metadata, template_type, confidence_reason, doc_id))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -693,7 +812,10 @@ def assign_work_route():
     data = request.json
     doc_ids = data.get('doc_ids', [])
     user_id = data.get('user_id')
-    assigner = data.get('assigner', 'Admin')
+    doc_ids = data.get('doc_ids', [])
+    user_id = data.get('user_id')
+    # Bug 4 Fix: Dynamic Assigner
+    assigner = data.get('assigner', 'System')
     
     if not doc_ids or not user_id:
         return jsonify({"error": "Missing doc_ids or user_id"}), 400
@@ -707,7 +829,10 @@ def assign_work_route():
 def transfer_container_route(id):
     data = request.json
     new_location = data.get('location')
-    user = data.get('user', 'Admin')
+    data = request.json
+    new_location = data.get('location')
+    # Bug 4 Fix: Dynamic User
+    user = data.get('user', 'System')
     
     from database.db import log_transfer, get_db_connection
     
@@ -791,6 +916,33 @@ def get_document_details(doc_id):
     if doc:
         return jsonify(doc)
     return jsonify({"error": "Document not found"}), 404
+
+@app.route('/view/<int:doc_id>', methods=['GET'])
+def view_document_file(doc_id):
+    from database.db import get_document
+    doc = get_document(doc_id)
+    if not doc:
+        return jsonify({"error": "Not found"}), 404
+        
+    filename = doc.get('file_path')
+    if not filename:
+         return jsonify({"error": "No file path recorded"}), 404
+
+    # Ensure we use safe_join logic implicitly via send_from_directory
+    try:
+        # Note: filename in DB is relative e.g., 'processed/2025-01-01/File.pdf'
+        # send_from_directory expects just the filename, but if it has subdirs, 
+        # usually we need to be careful. However, Flask's send_from_directory
+        # is relative to the directory passed.
+        
+        # If filename contains full path or leading slash, clean it?
+        # Assuming DB stores relative path without leading slash.
+        
+        directory = app.config['UPLOAD_FOLDER']
+        return send_from_directory(directory, filename)
+    except Exception as e:
+        app.logger.error(f"File serve error: {e}")
+        return jsonify({"error": "File access failed"}), 500
 
 @app.route('/export/csv', methods=['GET'])
 def export_csv():
@@ -906,6 +1058,10 @@ def reclassify_document_route(doc_id):
     log_audit('document', doc_id, 'reclassify', f"Changed category", user, old_value=old_category, new_value=new_category, ip_address=request.remote_addr)
     
     return jsonify({"message": "Reclassified", "metadata": new_metadata}), 200
+
+
+
+
 
 # --- AUDIT & REPORTING ENDPOINTS ---
 @app.route('/audit/logs', methods=['GET'])
@@ -1097,9 +1253,13 @@ def delete_document(doc_id):
         log_audit('document', doc_id, 'DELETE_PERMANENT', "Document permanently deleted", user_id)
     else:
         # Soft Delete
-        conn.execute("UPDATE documents SET status = 'Soft_Deleted' WHERE id = ?", (doc_id,))
-        conn.commit()
-        log_audit('document', doc_id, 'DELETE_SOFT', "Document moved to Recycle Bin", user_id)
+        from database.db import soft_delete_document
+        if soft_delete_document(doc_id, user_id):
+             conn.close()
+             return jsonify({"message": "Document moved to Recycle Bin"}), 200
+        else:
+             conn.close()
+             return jsonify({"error": "Soft delete failed"}), 500
         
     conn.close()
     return jsonify({"message": "Document deleted"}), 200
@@ -1151,19 +1311,7 @@ def restore_container(id):
     log_audit('container', id, 'RESTORE', "Container restored from recycle bin", "Admin")
     return jsonify({"message": "Container restored"}), 200
 
-@app.route('/documents/<int:doc_id>/restore', methods=['POST'])
-def restore_document(doc_id):
-    if check_legal_hold():
-         return jsonify({"error": "Legal Hold Active: Changes are prohibited."}), 403
 
-    conn = get_db_connection()
-    conn.execute("UPDATE documents SET status = 'Published' WHERE id = ?", (doc_id,))
-    conn.commit()
-    conn.close()
-    
-    user_id = request.args.get('user_id', 'Admin')
-    log_audit('document', doc_id, 'RESTORE', "Document restored from recycle bin", user_id)
-    return jsonify({"message": "Restored"}), 200
 
 @app.route('/taxonomy', methods=['GET', 'POST'])
 def manage_taxonomy():
@@ -1297,7 +1445,8 @@ def apply_watermark_image(input_path, output_stream):
 
 @app.route('/favorites', methods=['GET', 'POST', 'DELETE'])
 def manage_favorites():
-    user_id = request.args.get('user_id', 'Gokul_Admin')
+    # Bug 5 Fix: Don't default to Gokul_Admin
+    user_id = request.args.get('user_id', 'System')
     if request.method == 'POST':
         doc_id = request.json.get('document_id')
         status = toggle_favorite(user_id, doc_id)
@@ -1412,6 +1561,16 @@ def direct_scan():
     except Exception as e:
         return jsonify({"error": f"Direct Scan failed: {str(e)}"}), 500
 
+
+
+@app.route('/documents/<int:doc_id>/restore', methods=['POST'])
+def restore_document_route(doc_id):
+    user_id = request.args.get('user_id', 'Admin')
+    from database.db import restore_document
+    if restore_document(doc_id, user_id):
+        return jsonify({"message": "Document restored successfully"}), 200
+    return jsonify({"error": "Failed to restore document"}), 500
+
 @app.route('/taxonomy/versioned-update', methods=['POST'])
 @require_auth(roles=['Admin'])
 def update_taxonomy_versioned_route():
@@ -1427,6 +1586,96 @@ def update_taxonomy_versioned_route():
     if 'error' in result:
         return jsonify(result), 500
     return jsonify(result), 200
+
+
+
+@app.route('/documents/<int:doc_id>/versions', methods=['GET'])
+def get_versions_route(doc_id):
+    from database.db import get_document_versions
+    versions = get_document_versions(doc_id)
+    return jsonify(versions)
+
+@app.route('/documents/<int:doc_id>/details', methods=['GET'])
+def get_doc_details_route(doc_id):
+    from database.db import get_document
+    doc = get_document(doc_id)
+    if doc:
+        return jsonify(dict(doc))
+    return jsonify({"error": "Not found"}), 404
+
+@app.route('/audit/document/<int:doc_id>', methods=['GET'])
+def get_doc_history_route(doc_id):
+    from database.db import get_audit_logs
+    # Filter logs for this specific document
+    logs = get_audit_logs({'entity_id': doc_id, 'entity_type': 'document'})
+    return jsonify(logs)
+
+@app.route('/documents/<int:doc_id>/<action>', methods=['POST'])
+def document_approval_action(doc_id, action):
+    from database.db import update_approval_status, log_audit
+    
+    if action not in ['approve', 'reject', 'request_changes']:
+        return jsonify({"error": "Invalid action"}), 400
+        
+    data = request.json or {}
+    user = request.args.get('user', 'Admin')
+    reason = data.get('reason')
+    
+    status_map = {
+        'approve': 'Approved',
+        'reject': 'Rejected',
+        'request_changes': 'Changes Requested'
+    }
+    
+    new_status = status_map[action]
+    success = update_approval_status(doc_id, new_status, user, notes=reason)
+    
+    if success:
+        return jsonify({"message": f"Document {new_status}"}), 200
+    return jsonify({"error": "Action failed"}), 500
+
+
+# --- Cloud Manager Endpoints ---
+@app.route('/cloud/status', methods=['GET'])
+def cloud_status():
+    cm = CloudManager(app.config['UPLOAD_FOLDER'])
+    # Check if connected
+    connected = cm.cloud.service is not None or cm.cloud.authenticate()
+    return jsonify({
+        "connected": connected,
+        "is_mock": cm.cloud.is_mock,
+        "email": "mock-user@gmail.com" if cm.cloud.is_mock else "Configured Account" 
+    })
+
+@app.route('/cloud/files', methods=['GET'])
+def list_cloud_files():
+    cm = CloudManager(app.config['UPLOAD_FOLDER'])
+    files = cm.cloud.list_files()
+    return jsonify(files)
+
+@app.route('/cloud/action', methods=['POST'])
+def cloud_action():
+    action = request.json.get('action')
+    cm = CloudManager(app.config['UPLOAD_FOLDER'])
+    
+    if action == 'auto-sort':
+        result = cm.auto_sort_cloud()
+        return jsonify({"message": "Auto-Sort Completed", "details": result})
+    elif action == 'clean':
+        result = cm.clean_repository_cloud()
+        return jsonify({"message": "Clean Completed", "details": result})
+    elif action == 'deduplicate':
+        result = cm.remove_duplicates_cloud()
+        return jsonify({"message": "Deduplication Completed", "details": result})
+    else:
+        return jsonify({"error": "Invalid action"}), 400
+
+@app.route('/cloud/login', methods=['POST'])
+def cloud_login():
+    # Trigger authentication flow
+    cm = CloudManager(app.config['UPLOAD_FOLDER'])
+    success = cm.cloud.authenticate()
+    return jsonify({"success": success, "is_mock": cm.cloud.is_mock})
 
 if __name__ == '__main__':
     try:
